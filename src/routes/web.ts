@@ -7,7 +7,7 @@ import { requireSession } from "../middleware/session-auth"
 import { layoutHtml, escape } from "../lib/html"
 import { generateApiKey } from "../lib/apikeys"
 import { env } from "../lib/env"
-
+import { approveDeviceCode } from "./device-auth"
 export const web = new Hono()
 
 // ---------------------------------------------------------------------------
@@ -18,14 +18,18 @@ export const web = new Hono()
 
 web.get("/login", async (c) => {
   const body = `
-  <div class="center-card">
-    <h1>zen-gateway</h1>
-    <form method="POST" action="/login">
-      <input type="email" name="email" placeholder="email" required>
-      <input type="password" name="password" placeholder="password" required>
-      <button type="submit" class="primary">Log in</button>
-    </form>
-    <div class="switch">No account? <a href="/signup" style="color:var(--amber)">Sign up</a></div>
+  <div class="center-wrap">
+    <div class="center-card">
+      <div class="brandmark"><span class="mark">z</span>zen-gateway</div>
+      <h1>Log in</h1>
+      <p class="lead">Use the email and password from your account.</p>
+      <form method="POST" action="/login">
+        <input type="email" name="email" placeholder="email" required autocomplete="email">
+        <input type="password" name="password" placeholder="password" required autocomplete="current-password">
+        <button type="submit" class="primary">Log in</button>
+      </form>
+      <div class="switch">No account? <a href="/signup" class="accent">Sign up</a></div>
+    </div>
   </div>`
   return c.html(layoutHtml("log in", "", body, { error: c.req.query("error") }))
 })
@@ -44,19 +48,23 @@ web.post("/login", async (c) => {
 
   const session = issueSession(user.id, user.role)
   setCookie(c, SESSION_COOKIE, session.token, SESSION_COOKIE_OPTIONS)
-  return c.redirect(user.role === "admin" ? "/admin" : "/dashboard", 303)
+  return c.redirect(user.role === "admin" ? "/admin2" : "/dashboard", 303)
 })
 
 web.get("/signup", async (c) => {
   const body = `
-  <div class="center-card">
-    <h1>Create account</h1>
-    <form method="POST" action="/signup">
-      <input type="email" name="email" placeholder="email" required>
-      <input type="password" name="password" placeholder="password (min 8 chars)" required minlength="8">
-      <button type="submit" class="primary">Sign up</button>
-    </form>
-    <div class="switch">Already have an account? <a href="/login" style="color:var(--amber)">Log in</a></div>
+  <div class="center-wrap">
+    <div class="center-card">
+      <div class="brandmark"><span class="mark">z</span>zen-gateway</div>
+      <h1>Create account</h1>
+      <p class="lead">Free tier includes a 50,000 token monthly budget.</p>
+      <form method="POST" action="/signup">
+        <input type="email" name="email" placeholder="email" required autocomplete="email">
+        <input type="password" name="password" placeholder="password (min 8 chars)" required minlength="8" autocomplete="new-password">
+        <button type="submit" class="primary">Sign up</button>
+      </form>
+      <div class="switch">Already have an account? <a href="/login" class="accent">Log in</a></div>
+    </div>
   </div>`
   return c.html(layoutHtml("sign up", "", body, { error: c.req.query("error") }))
 })
@@ -122,15 +130,32 @@ web.get("/dashboard", requireSession(), async (c) => {
   const justCreatedKey = c.req.query("new_key")
 
   const body = `
-  <h2>Account</h2>
+  <h1>Account</h1>
+  <p class="lead">Your tier, this month's usage, and API keys for the CLI.</p>
+
   <div class="stat-grid">
-    <div class="stat-card"><div class="label">Email</div><div class="val" style="font-size:14px">${escape(user?.email)}</div></div>
-    <div class="stat-card"><div class="label">Tier</div><div class="val">${escape(user?.tier ?? "free")}</div></div>
-    <div class="stat-card"><div class="label">This month</div><div class="val" style="font-size:14px">${used.toLocaleString()} / ${budget.toLocaleString()} (${pct}%)</div></div>
+    <div class="stat-card">
+      <div class="label">Email</div>
+      <div class="val" style="font-size:14px">${escape(user?.email ?? "—")}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Tier</div>
+      <div class="val"><span class="tier ${escape(user?.tier ?? "free")}">${escape(user?.tier ?? "free")}</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="label">This month</div>
+      <div class="val">${used.toLocaleString()}</div>
+      <div class="sub">of ${budget.toLocaleString()} tokens · ${pct}%</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Active keys</div>
+      <div class="val">${keys.filter(k => !k.revoked).length}</div>
+      <div class="sub">${keys.length} total</div>
+    </div>
   </div>
 
   ${justCreatedKey ? `
-  <div class="error-box" style="background:#16302280;border-color:var(--green);color:#c3f7d8">
+  <div class="success-box">
     New API key created — copy it now, it won't be shown again:<br>
     <code class="mono-block">${escape(justCreatedKey)}</code>
   </div>` : ""}
@@ -141,18 +166,19 @@ web.get("/dashboard", requireSession(), async (c) => {
     <thead><tr><th>key</th><th>label</th><th>created</th><th>last used</th><th>status</th><th></th></tr></thead>
     <tbody>
     ${keys.length ? keys.map(k => `<tr>
-      <td><code>${escape(k.key_prefix)}...</code></td>
+      <td><code>${escape(k.key_prefix)}…</code></td>
       <td>${escape(k.label ?? "—")}</td>
       <td>${new Date(k.created_at).toLocaleString()}</td>
-      <td>${k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}</td>
-      <td><span class="badge ${k.revoked ? "rejected" : "success"}">${k.revoked ? "revoked" : "active"}</span></td>
-      <td>${!k.revoked ? `<form method="POST" action="/dashboard/api-keys/${escape(k.id)}/revoke" onsubmit="return confirm('Revoke this key? Anything using it will stop working immediately.')"><button type="submit" class="danger">Revoke</button></form>` : ""}</td>
-    </tr>`).join("") : `<tr><td colspan="6" class="muted" style="text-align:center">No API keys yet — create one below</td></tr>`}
+      <td>${k.last_used_at ? new Date(k.last_used_at).toLocaleString() : `<span class="muted">never</span>`}</td>
+      <td><span class="badge ${k.revoked ? "rejected" : "good"}">${k.revoked ? "revoked" : "active"}</span></td>
+      <td style="text-align:right">${!k.revoked ? `<form method="POST" action="/dashboard/api-keys/${escape(k.id)}/revoke" onsubmit="return confirm('Revoke this key? Anything using it will stop working immediately.')"><button type="submit" class="danger">Revoke</button></form>` : ""}</td>
+    </tr>`).join("") : `<tr><td colspan="6" class="muted" style="text-align:center;padding:32px">No API keys yet — create one below</td></tr>`}
     </tbody>
   </table>
 
-  <form method="POST" action="/dashboard/api-keys">
-    <input name="label" placeholder="label (e.g. 'zen code cli - laptop')" style="width:280px">
+  <h2>Create a key</h2>
+  <form method="POST" action="/dashboard/api-keys" class="form-row">
+    <input name="label" placeholder="label (e.g. 'zen code cli - laptop')" style="flex:1;min-width:240px">
     <button type="submit" class="primary">Create API key</button>
   </form>`
 
@@ -173,4 +199,52 @@ web.post("/dashboard/api-keys/:id/revoke", requireSession(), async (c) => {
   const session = c.var.session
   await sql`UPDATE api_keys SET revoked = true WHERE id = ${c.req.param("id")} AND user_id = ${session.userId}`
   return c.redirect("/dashboard", 303)
+})
+web.get("/device", async (c) => {
+  const code = c.req.query("code") ?? ""
+  const error = c.req.query("error")
+
+  const body = `
+  <div class="center-wrap">
+    <div class="center-card">
+      <div class="brandmark"><span class="mark">z</span>zen-gateway</div>
+      <h1>Connect the ZEN Code CLI</h1>
+      <p class="lead">Log in to link this device. Your CLI session stays active until you run <code>zen logout</code>.</p>
+      <form method="POST" action="/device">
+        <input type="hidden" name="code" value="${escape(code)}">
+        <input type="email" name="email" placeholder="email" required autocomplete="email">
+        <input type="password" name="password" placeholder="password" required autocomplete="current-password">
+        <button type="submit" class="primary">Connect</button>
+      </form>
+    </div>
+  </div>`
+  return c.html(layoutHtml("connect device", "", body, { error }))
+})
+ 
+web.post("/device", async (c) => {
+  const body = await c.req.parseBody()
+  const code = String(body.code ?? "")
+  const email = String(body.email ?? "")
+  const password = String(body.password ?? "")
+ 
+  const rows = await sql`SELECT id, password_hash FROM users WHERE email = ${email}`
+  if (rows.length === 0) return c.redirect(`/device?code=${encodeURIComponent(code)}&error=invalid+credentials`, 303)
+ 
+  const ok = await verifyPassword(password, rows[0].password_hash)
+  if (!ok) return c.redirect(`/device?code=${encodeURIComponent(code)}&error=invalid+credentials`, 303)
+ 
+  const approved = await approveDeviceCode(code, rows[0].id)
+  if (!approved) {
+    return c.redirect(`/device?code=${encodeURIComponent(code)}&error=this+code+expired,+run+zen+login+again`, 303)
+  }
+ 
+  const successBody = `
+  <div class="center-wrap">
+    <div class="center-card" style="text-align:center">
+      <div class="brandmark" style="justify-content:center"><span class="mark">z</span>zen-gateway</div>
+      <h1 style="text-align:center;color:var(--accent)">✓ Connected</h1>
+      <p class="muted" style="text-align:center">You can close this tab and return to your terminal.</p>
+    </div>
+  </div>`
+  return c.html(layoutHtml("connected", "", successBody))
 })

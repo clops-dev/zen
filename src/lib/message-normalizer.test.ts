@@ -42,7 +42,7 @@ describe("message-normalizer", () => {
           type: "tool-call",
           toolCallId: "call_123",
           toolName: "get_weather",
-          args: { location: "Tokyo" }
+          input: { location: "Tokyo" }
         }
       ]
     })
@@ -65,7 +65,7 @@ describe("message-normalizer", () => {
           type: "tool-result",
           toolCallId: "call_123",
           toolName: "get_weather",
-          result: "Sunny"
+          output: { type: "text", value: "Sunny" }
         }
       ]
     })

@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root,
+  :root.light,
+  .light {
+    --bg: 250 250 250;
+    --panel: 255 255 255;
+    --line: 229 229 229;
+    --line-strong: 212 212 212;
+    --text: 10 10 10;
+    --muted: 115 115 115;
+    --accent: 220 38 38;
+    --good: 64 64 64;
+    --bad: 220 38 38;
+  }
+  :root.dark,
+  .dark {
+    --bg: 0 0 0;
+    --panel: 12 12 12;
+    --line: 38 38 38;
+    --line-strong: 64 64 64;
+    --text: 245 245 245;
+    --muted: 140 140 140;
+    --accent: 239 68 68;
+    --good: 200 200 200;
+    --bad: 239 68 68;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    font-feature-settings: "cv11", "ss01", "ss03";
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-panel border border-line rounded-lg shadow-card;
+  }
+  .card-pad {
+    @apply p-5;
+  }
+  .input {
+    @apply bg-bg border border-line rounded-md text-text placeholder:text-muted
+           px-3 py-2 text-sm focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 transition;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium
+           border border-line bg-panel text-text px-3 py-2 hover:border-text hover:text-text
+           disabled:opacity-50 disabled:pointer-events-none transition;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-md text-sm font-semibold
+           bg-accent text-white border border-accent px-3 py-2 hover:bg-accent/90 hover:border-accent
+           disabled:opacity-50 disabled:pointer-events-none transition;
+  }
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium
+           border border-line bg-panel text-text px-3 py-2 hover:border-bad hover:text-bad
+           disabled:opacity-50 disabled:pointer-events-none transition;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-md text-sm
+           text-muted hover:text-text hover:bg-line/30 px-2 py-1.5 transition;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium border border-line bg-panel;
+  }
+  .chip-good { @apply text-text border-line-strong bg-line/40; }
+  .chip-bad { @apply text-bad border-bad/40 bg-bad/10; }
+  .chip-muted { @apply text-muted; }
+  .chip-accent { @apply text-accent border-accent/40 bg-accent/10; }
+  .label {
+    @apply text-[11px] uppercase tracking-[0.14em] text-muted font-semibold;
+  }
+  .row-hov {
+    @apply hover:bg-line/30 transition-colors;
+  }
+  .table-clean {
+    @apply w-full text-sm border-separate border-spacing-0;
+  }
+  .table-clean th {
+    @apply text-left text-[11px] uppercase tracking-[0.14em] text-muted font-semibold px-4 py-2.5 border-b border-line-strong;
+  }
+  .table-clean td {
+    @apply px-4 py-3 border-b border-line align-middle;
+  }
+  .table-clean tr:last-child td {
+    @apply border-b-0;
+  }
+  .scroll-y {
+    @apply overflow-y-auto;
+  }
+  .scroll-y::-webkit-scrollbar {
+    width: 8px;
+  }
+  .scroll-y::-webkit-scrollbar-thumb {
+    background: rgb(var(--line-strong));
+    border-radius: 8px;
+  }
+}
+
+/* Recharts — keep it monochrome; only red is the chromatic accent */
+.dark .recharts-cartesian-axis-tick text {
+  fill: rgb(var(--muted));
+}
+.dark .recharts-cartesian-grid line {
+  stroke: rgb(var(--line));
+}
+.dark .recharts-tooltip-cursor {
+  stroke: rgb(var(--accent) / 0.35);
+}

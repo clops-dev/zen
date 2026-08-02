@@ -145,9 +145,141 @@ CLI-side changes, since that's the whole point of standardizing on it here.
 - `src/routes/gateway.ts` — the actual `/v1/chat/completions`/`/v1/models`
   endpoints, tying all of the above together.
 - `src/routes/admin.ts` — Overview / Users / Providers / Models / Routing /
-  Requests. All server-rendered forms, no client JS.
+  Requests. Server-rendered forms, no client JS.
 - `src/routes/web.ts` — login, signup, and the per-user dashboard (their own
   tier/usage/API keys).
+
+## Admin SPA (new)
+
+The `/admin` HTML pages above remain the supported admin surface. In addition,
+`/admin2` serves a new React + Tailwind control plane aimed at platform
+engineers. It talks to a JSON API at `/admin-api/*` (session-cookie auth,
+admin-only). The legacy HTML pages are untouched, so existing flows and
+bookmarks keep working.
+
+### Build & run
+
+```bash
+cd admin && bun install && bun run build && cd ..
+bun run start
+```
+
+Then visit `http://localhost:8787/admin2`. The dev loop is `cd admin && bun
+run dev` (Vite proxies `/admin-api` and `/v1/auth` to the running backend).
+
+### Sections shipped
+
+* **Dashboard** — 10 metrics (today, totals, success rate, avg latency,
+  active providers/models/keys/users/combos, total spend) plus six charts
+  (request volume 24h, success/failure ratio, top providers 7d, top models 7d,
+  latency p50/p95, provider health cards).
+* **Providers** — full CRUD on `providers` with sidecar `provider_meta` for
+  the extended fields (organization, region, timeout, retry, rate limit,
+  priority, weight, cost multiplier, custom headers). API keys are stored
+  server-side; reads return only a `•••• (N chars)` preview, never the raw
+  secret. Per-provider "Test connection" reaches `/models`.
+* **Models** — registry CRUD with all six capability flags
+  (Tools/Vision/JSON/Streaming/Reasoning/Embeddings), pricing, context window,
+  enabled toggle, clone, and live ping via `/chat/completions`.
+* **Routing** — Tier-by-tier view (Trivial/Simple/Medium/Complex) with
+  add/toggle/delete on `tier_routes`. Reads `tier_routes` + joins model +
+  provider for display.
+* **Combos (NEW)** — the new feature. Bundles providers + models + routing
+  strategy + fallback chain + request defaults + rate limits + budget caps.
+  Seven starter templates seeded by migration `011_audit_and_combos.sql`
+  (Cheapest AI, Premium AI, Coding Assistant, Reasoning Models, Vision
+  Models, Local Ollama, Failover Gateway). CRUD + clone + archive + export
+  (JSON download) + import (paste JSON) + per-provider test.
+* **API Keys** — admin view of every user's `api_keys`. Create / rotate /
+  revoke. Raw key shown exactly once after create / rotate via a copyable
+  modal. Combo attach on create.
+* **Requests** — paginated table over `ai_requests` with status /
+  provider / model substring filters.
+* **Users** — list, create, inline-edit tier/status, delete. Includes
+  active-keys count and lifetime cost.
+* **Audit Logs** — `audit_logs` viewer filtered by resource, action, result.
+* **Settings** — runtime summary (active counts) + env exposure.
+
+### New endpoints (`/admin-api/*`)
+
+All admin-only via the existing `requireAdmin()` middleware. Every mutating
+endpoint emits an `audit_logs` row.
+
+```
+GET    /admin-api/me                              current admin user
+GET    /admin-api/dashboard/overview              metrics + chart series
+GET    /admin-api/dashboard/providers/health      provider health cards
+
+GET    /admin-api/users                           list users
+POST   /admin-api/users                           create user
+GET    /admin-api/users/:id                       user + usage + keys
+PATCH  /admin-api/users/:id                       update role/tier/status
+DELETE /admin-api/users/:id                       delete user
+
+GET    /admin-api/providers                       list (api_key masked)
+POST   /admin-api/providers                       create
+PATCH  /admin-api/providers/:id                   update fields or api_key
+POST   /admin-api/providers/:id/toggle            enable/disable
+POST   /admin-api/providers/:id/test              live connectivity check
+DELETE /admin-api/providers/:id                   delete
+
+GET    /admin-api/models                          list
+POST   /admin-api/models                          create
+PATCH  /admin-api/models/:id                      update
+POST   /admin-api/models/:id/clone                clone with `-copy` suffix
+POST   /admin-api/models/:id/toggle               enable/disable
+POST   /admin-api/models/:id/test                 live ping via chat/completions
+DELETE /admin-api/models/:id                      delete
+
+GET    /admin-api/routing                         list tier_routes joined to model + provider
+POST   /admin-api/routing                         upsert route
+PATCH  /admin-api/routing/:id                     update tier/weight
+POST   /admin-api/routing/:id/toggle              enable/disable
+DELETE /admin-api/routing/:id                     delete
+
+GET    /admin-api/requests                        filterable, paginated
+GET    /admin-api/requests/:id                    full row
+
+GET    /admin-api/api-keys                        list across all users
+POST   /admin-api/api-keys                        create (returns raw key once)
+POST   /admin-api/api-keys/:id/revoke             revoke
+POST   /admin-api/api-keys/:id/rotate             rotate (returns new key once)
+
+GET    /admin-api/combos                          list
+GET    /admin-api/combos/:id                      combo + provider/model join
+POST   /admin-api/combos                          create
+PATCH  /admin-api/combos/:id                      update
+POST   /admin-api/combos/:id/clone                clone as draft
+POST   /admin-api/combos/:id/archive              archive
+GET    /admin-api/combos/:id/export               JSON export
+POST   /admin-api/combos/import                   JSON import
+POST   /admin-api/combos/:id/test                 per-provider connectivity
+DELETE /admin-api/combos/:id                      delete
+
+GET    /admin-api/audit                           filterable audit log
+GET    /admin-api/settings                        runtime summary + env
+```
+
+### New tables (migration `011_audit_and_combos.sql`)
+
+* `combos` — slug, name, description, status, `provider_ids uuid[]`,
+  `model_ids uuid[]`, `routing_strategy`, `routing_config jsonb`,
+  `fallback_chain uuid[]`, `defaults jsonb`, rate-limit / token-cap /
+  cost-cap, `allowed_user_ids uuid[]`, `is_template`, `updated_at` trigger.
+* `audit_logs` — append-only ledger with `actor_id`, `actor_email`,
+  `action`, `resource`, `resource_id`, `ip`, `result`, `metadata jsonb`,
+  three indexes (by actor, by resource, by recency).
+* `provider_meta` — sidecar table for the extended provider fields the SPA
+  edits (`organization`, `region`, `timeout_ms`, `retry_max`,
+  `rate_limit_rpm`, `priority`, `weight`, `cost_multiplier`, `headers`),
+  so we don't have to ALTER the canonical `providers` schema every time
+  the SPA grows.
+* `models.supports_streaming / supports_reasoning / supports_embeddings`
+  — additive columns; default `true / false / false`.
+* `api_keys.combo_id` — nullable FK to `combos(id) ON DELETE SET NULL`,
+  lets a key inherit the combo's policy.
+
+Seven starter combo templates are inserted by the migration.
 
 ## Known limitations, flagged not fixed
 

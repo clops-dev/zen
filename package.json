@@ -4,18 +4,26 @@
   "type": "module",
   "scripts": {
     "start": "bun run src/index.ts",
-    "dev": "bun run --watch src/index.ts"
+    "dev": "bun run --watch src/index.ts",
+    "test": "UPSTREAM_TIMEOUT_MS_NON_STREAMING=200 UPSTREAM_TIMEOUT_MS_STREAMING=300 UPSTREAM_IDLE_TIMEOUT_MS_STREAMING=300 bun test",
+    "verify-models": "bun run scripts/verify-models.ts",
+    "seed-unorouter": "bun run scripts/seed-unorouter.ts",
+    "set-unorouter-flash-lite": "bun run scripts/set-unorouter-flash-lite.ts",
+    "apply-tier-routes-migration": "bun run scripts/apply-tier-routes-migration.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.23",
+    "@ai-sdk/openai-compatible": "^3.0.7",
+    "ai": "^7.0.22",
+    "bcryptjs": "^2.4.3",
+    "gpt-tokenizer": "^3.4.0",
     "hono": "^4.6.14",
     "postgres": "^3.4.5",
-    "bcryptjs": "^2.4.3",
-    "zod": "^3.24.1",
-    "ai": "^7.0.22",
-    "@ai-sdk/openai-compatible": "^3.0.7"
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
+    "bun-types": "^1.3.14",
     "typescript": "^5.5.4"
   }
 }

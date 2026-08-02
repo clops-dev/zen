@@ -1,12 +1,40 @@
 import { Hono } from "hono"
 import { auth } from "./routes/auth"
+import { deviceAuth } from "./routes/device-auth"
 import { gateway } from "./routes/gateway"
 import { web } from "./routes/web"
-import { admin } from "./routes/admin"
+import { adminApi } from "./routes/admin-api"
+
+import { sql } from "./lib/db"
+import { existsSync, statSync } from "node:fs"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
 
 const app = new Hono()
 
-app.get("/healthz", (c) => c.json({ ok: true }))
+app.get("/healthz", async (c) => {
+  let dbOk = false
+  const q = sql`SELECT 1`
+  try {
+    await Promise.race([
+      q,
+      new Promise((_, reject) => setTimeout(() => {
+        q.cancel()
+        reject(new Error("timeout"))
+      }, 2000))
+    ])
+    dbOk = true
+  } catch (err) {
+    console.error("[zen-gateway] /healthz db check failed:", err)
+  }
+
+  const ok = dbOk
+  return c.json({
+    ok,
+    db: dbOk ? "ok" : "error",
+    timestamp: new Date().toISOString()
+  }, ok ? 200 : 503)
+})
 
 app.get("/", (c) => c.redirect("/login", 303))
 
@@ -25,19 +53,68 @@ app.onError((err, c) => {
   return c.json({ error: "internal_server_error", message: err instanceof Error ? err.message : String(err) }, 500)
 })
 
+// JSON API — used by the CLI (or scripted signups)
+const v1 = new Hono()
+v1.route("/auth", auth)
+v1.route("/auth", deviceAuth) // POST /v1/auth/device/start, GET /v1/auth/device/poll
+v1.route("/", gateway) // POST /v1/chat/completions, GET /v1/models
+app.route("/v1", v1)
+
+// Legacy user-facing web UI (login / signup / per-user dashboard /
+// device-pair page). The previous SSR admin surface at /admin was a
+// quick prototype — we removed it in favour of the React SPA at /admin2,
+// so redirect any old /admin bookmarks to the new surface.
+app.route("/", web)
+
+// Legacy /admin redirects to the new SPA. Both `/admin` and `/admin/*`
+// bounce — the SPA uses /admin2/* and is not served from /admin/*.
+app.get("/admin", (c) => c.redirect("/admin2", 303))
+app.get("/admin/*", (c) => c.redirect("/admin2", 303))
+
+// JSON admin API for the new SPA.
+app.route("/admin-api", adminApi)
+
+// New SPA (built by admin/dist). Mounted at /admin2. Vite is configured
+// with `base: "/admin2/"`, so the built index.html references assets at
+// `/admin2/assets/...` and we just serve them straight from disk.
+const here = path.dirname(fileURLToPath(import.meta.url))
+const spaDir = path.resolve(here, "..", "admin", "dist")
+
+if (existsSync(spaDir) && statSync(spaDir).isDirectory()) {
+  app.get("/admin2/assets/*", (c) => {
+    const rel = c.req.path.replace(/^\/admin2\//, "")
+    const filePath = path.join(spaDir, rel)
+    if (!filePath.startsWith(spaDir)) return c.text("forbidden", 403)
+    return new Response(Bun.file(filePath))
+  })
+
+  // SPA fallback. Hono's wildcard pattern is `/*` (slash-asterisk), not
+  // bare `*` — register the bare `/admin2` and `/admin2/*` (any subpath)
+  // so client-side routes (combos/:id, providers/:id, etc.) resolve when
+  // navigated directly.
+  const indexHtml = Bun.file(path.join(spaDir, "index.html"))
+  const serveIndex = () => new Response(indexHtml, { headers: { "content-type": "text/html; charset=utf-8" } })
+  app.get("/admin2", serveIndex)
+  app.get("/admin2/*", serveIndex)
+} else {
+  const placeholder = (c: any) =>
+    c.html(
+      `<!doctype html><meta charset=utf-8>
+      <body style="background:#0c0a09;color:#fafaf9;font-family:system-ui;padding:48px">
+      <h1 style="color:#ffb454">zen-gateway admin SPA</h1>
+      <p>Built bundle not found. Run the build once:</p>
+      <pre style="background:#1c1917;color:#ffb454;padding:12px;border-radius:6px">cd admin && bun install && bun run build</pre>
+      <p>After that, /admin2 will serve the React SPA. The legacy HTML admin at <a href="/admin" style="color:#ffb454">/admin</a> has been removed.</p>
+      </body>`,
+      503,
+    )
+  app.get("/admin2", placeholder)
+  app.get("/admin2/*", placeholder)
+}
+
 app.notFound((c) => {
   if ((c.req.header("Accept") ?? "").includes("text/html")) return c.html("<h1>404 not found</h1>", 404)
   return c.json({ error: "not_found", path: c.req.path }, 404)
 })
-
-// JSON API — used by the CLI (or scripted signups)
-const v1 = new Hono()
-v1.route("/auth", auth)
-v1.route("/", gateway) // POST /v1/chat/completions, GET /v1/models
-app.route("/v1", v1)
-
-// Server-rendered web UI
-app.route("/", web)      // /login, /signup, /dashboard, /logout
-app.route("/admin", admin)
 
 export default app
