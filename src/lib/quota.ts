@@ -1,4 +1,4 @@
-import { sql } from "./db"
+import { sql, withDbResilience } from "./db"
 import type { ComplexityTier } from "./db"
 
 export interface QuotaStatus {
@@ -15,7 +15,7 @@ function monthStart(): Date {
 }
 
 export async function checkQuota(userId: string): Promise<QuotaStatus> {
-  const subRows = await sql`SELECT status, token_budget_monthly FROM subscriptions WHERE user_id = ${userId}`
+  const subRows = await withDbResilience(() => sql`SELECT status, token_budget_monthly FROM subscriptions WHERE user_id = ${userId}`)
   if (subRows.length === 0) {
     return { allowed: false, reason: "no_subscription", maxComplexityTier: "trivial" }
   }
@@ -24,10 +24,10 @@ export async function checkQuota(userId: string): Promise<QuotaStatus> {
     return { allowed: false, reason: "suspended", maxComplexityTier: "trivial" }
   }
 
-  const usageRows = await sql`
+  const usageRows = await withDbResilience(() => sql`
     SELECT total_input_tokens, total_output_tokens
     FROM monthly_usage WHERE user_id = ${userId} AND month = ${monthStart()}
-  `
+  `)
   const used = usageRows.length
     ? Number(usageRows[0].total_input_tokens) + Number(usageRows[0].total_output_tokens)
     : 0
@@ -52,7 +52,7 @@ export async function recordUsage(
   outputTokens: number,
   costUsd: number,
 ): Promise<void> {
-  await sql`
+  await withDbResilience(() => sql`
     INSERT INTO monthly_usage (user_id, month, total_input_tokens, total_output_tokens, total_cost_usd, request_count)
     VALUES (${userId}, ${monthStart()}, ${inputTokens}, ${outputTokens}, ${costUsd}, 1)
     ON CONFLICT (user_id, month) DO UPDATE SET
@@ -60,5 +60,5 @@ export async function recordUsage(
       total_output_tokens = monthly_usage.total_output_tokens + EXCLUDED.total_output_tokens,
       total_cost_usd = monthly_usage.total_cost_usd + EXCLUDED.total_cost_usd,
       request_count = monthly_usage.request_count + 1
-  `
+  `)
 }

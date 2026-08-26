@@ -181,12 +181,18 @@ describe("ai-call timeout", () => {
   })
 
   test("streaming: hung provider's `started` resolves ok:false (gateway can fall back)", async () => {
-    // The streaming path now uses UPSTREAM_IDLE_TIMEOUT_MS_STREAMING (idle
-    // timer, reset per chunk) rather than the old fixed UPSTREAM_TIMEOUT_MS_STREAMING.
-    // Since the mock hangs without sending any chunk, the idle timer fires first.
-    const savedIdle = process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
-    process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING = process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING ?? "300"
-    const timeoutMs = Number(process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING)
+    // With the 4-timer architecture, the pre-first-byte budget is set by
+    // UPSTREAM_FIRST_TOKEN_TIMEOUT_MS (not the idle timer — that one is
+    // armed only after the first chunk arrives). When the mock hangs
+    // without sending any chunk, firstTokenTimer fires and START
+    // resolves ok:false with an UpstreamTimeoutError tagged
+    // `timeout:first_token`. The gateway then falls back to the next
+    // candidate.
+    const savedFirst = process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS
+    const savedConnect = process.env.UPSTREAM_CONNECT_TIMEOUT_MS
+    process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS = process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS ?? "300"
+    process.env.UPSTREAM_CONNECT_TIMEOUT_MS = process.env.UPSTREAM_CONNECT_TIMEOUT_MS ?? "150"
+    const firstTokenMs = Number(process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS)
     const mock = await startMock("hang")
     try {
       const t0 = Date.now()
@@ -210,13 +216,20 @@ describe("ai-call timeout", () => {
       const elapsed = Date.now() - t0
       expect(startResult.ok).toBe(false)
       expect(startResult.error).toBeInstanceOf(UpstreamTimeoutError)
-      expect((startResult.error as UpstreamTimeoutError).timeoutMs).toBe(timeoutMs)
+      // Either connect or firstToken timer will fire, depending on AI SDK
+      // internals. Both are pre-first-byte and both produce an
+      // UpstreamTimeoutError.
+      const reason = (startResult.error as UpstreamTimeoutError).rejectReason
+      expect(reason === "timeout:connect" || reason === "timeout:first_token").toBe(true)
+      expect((startResult.error as UpstreamTimeoutError).timeoutMs).toBeGreaterThanOrEqual(0)
       // `done` will reject too once the abort tears the stream down.
       const doneErr = await done.catch((e) => e)
       expect(doneErr).toBeInstanceOf(UpstreamTimeoutError)
       await readP
       expect(elapsed).toBeLessThan(5000)
-      expect(elapsed).toBeGreaterThanOrEqual(timeoutMs - 50)
+      // Either connect or firstToken timer fires — the budget is the
+      // firstTokenMs whichever fired.
+      expect(elapsed).toBeLessThan(firstTokenMs + 200)
     } finally {
       // Brief pause before stopping mock: the AI SDK may still be processing
       // internal async cleanup (retries, signal handlers) after the abort. If
@@ -224,8 +237,10 @@ describe("ai-call timeout", () => {
       // AbortError into the next test's execution window on stderr.
       await new Promise((r) => setTimeout(r, 30))
       mock.stop()
-      if (savedIdle === undefined) delete process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
-      else process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING = savedIdle
+      if (savedFirst === undefined) delete process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS
+      else process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS = savedFirst
+      if (savedConnect === undefined) delete process.env.UPSTREAM_CONNECT_TIMEOUT_MS
+      else process.env.UPSTREAM_CONNECT_TIMEOUT_MS = savedConnect
     }
   })
 
@@ -334,14 +349,16 @@ describe("ai-call stream: error body disguised as SSE", () => {
     }
   })
 
-  test("streaming: still throws NoOutputError when the SDK truly completes cleanly with no error", async () => {
-    // When the SDK doesn't reject anything, the !gotAnyContent branch must
-    // still surface NoOutputError (so the classifier can tag it as such and
-    // the dashboard can distinguish "model gave us nothing" from "upstream
-    // 429 quota exceeded"). This is the regression check for the fix above:
-    // we didn't accidentally route every empty stream through sdkRejection.
-    const savedIdle = process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
-    process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING = "200"
+  test("streaming: still throws UpstreamTimeoutError when the SDK truly completes cleanly with no error", async () => {
+    // The 4-timer architecture: the pre-first-byte phase is owned by
+    // connect + firstToken timers (not idle). When the SDK doesn't reject
+    // and no chunk arrives, one of those pre-first-byte timers fires and
+    // we surface UpstreamTimeoutError with the corresponding rejectReason
+    // tag. (When idle IS involved — chunks arrive then stall — `done`
+    // rejects with UpstreamTimeoutError tagged `timeout:idle`. That's
+    // covered by the timer tests.)
+    const savedFirst = process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS
+    process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS = "200"
     const mock = await startMock("hang")
     try {
       const { started } = callStreaming(
@@ -351,13 +368,11 @@ describe("ai-call stream: error body disguised as SSE", () => {
       )
       const startResult = await started
       expect(startResult.ok).toBe(false)
-      // Idle timer fires; abortCause is an UpstreamTimeoutError, not
-      // NoOutputError and not an APICallError.
       expect((startResult.error as Error).name).toBe("UpstreamTimeoutError")
     } finally {
       mock.stop()
-      if (savedIdle === undefined) delete process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
-      else process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING = savedIdle
+      if (savedFirst === undefined) delete process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS
+      else process.env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS = savedFirst
     }
   })
 })

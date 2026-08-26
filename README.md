@@ -291,6 +291,17 @@ Seven starter combo templates are inserted by the migration.
   the public internet.
 - The classifier is unsupervised heuristics, not measured against your real
   traffic yet — expect some misroutes until you tune the keyword list.
+
+## Known limitations, flagged not fixed
+
+- `providers.api_key` is stored in plaintext in Postgres. Fine for a
+  single-operator setup — restrict DB grants or add pgcrypto column
+  encryption before giving anyone else DB access.
+- No "forgot password" flow, no email verification on signup. Fine for ~100
+  known users you're onboarding directly; add these before opening signup to
+  the public internet.
+- The classifier is unsupervised heuristics, not measured against your real
+  traffic yet — expect some misroutes until you tune the keyword list.
 - No per-model context-window enforcement yet — a very long conversation
   could get routed to a model that can't hold it. Worth adding once you've
   picked real models and know their context windows (register them via the
@@ -298,3 +309,416 @@ Seven starter combo templates are inserted by the migration.
   against message length yet).
 - Rate limiting is per-user, Postgres-backed, 30 req/min by default
   (`src/routes/gateway.ts`) — adjust if that's wrong for your traffic shape.
+
+---
+
+## Production Operations
+
+This section covers operating Zen Gateway in a production Docker/Compose environment.
+
+### Architecture
+
+```
+                    Load Balancer (nginx / HAProxy / Caddy)
+                           │
+               ┌───────────┴───────────┐
+               ▼                       ▼
+          Gateway VM1             Gateway VM2        (stateless replicas)
+               │                       │
+               └───────────┬───────────┘
+                           ▼
+                    Neon PostgreSQL                  (cloud-managed)
+                           │
+                      AI Providers
+                    (OpenRouter, Groq, …)
+```
+
+**Database**: Production uses [Neon](https://neon.tech) managed PostgreSQL.
+The `postgres:` service in `docker-compose.yml` is for **local development only**.
+
+---
+
+### Build
+
+Build the Docker image with a deterministic tag:
+
+```bash
+# Build with git SHA + version (recommended for production)
+GIT_SHA=$(git rev-parse --short HEAD)
+VERSION=$(node -p "require('./package.json').version")
+
+docker build \
+  --build-arg VERSION="${VERSION}" \
+  --build-arg GIT_SHA="${GIT_SHA}" \
+  -t zen-gateway:${GIT_SHA} \
+  -t zen-gateway:${VERSION} \
+  .
+
+# Verify the image was built correctly
+docker inspect zen-gateway:${GIT_SHA} --format='{{.Config.User}}'
+# Expected: bun  (non-root)
+```
+
+> **CI builds this automatically.** The CI pipeline (`.github/workflows/ci.yml`)
+> tags every successful build with the git SHA and runs Trivy security scanning
+> before the image is considered safe to deploy.
+
+---
+
+### Run
+
+**Local development (with local Postgres):**
+
+```bash
+# Copy and fill in your config
+cp .env.example .env.production
+# Edit .env.production with real values
+
+docker compose up
+```
+
+**Production (with Neon):**
+
+```bash
+# .env.production must contain your Neon DATABASE_URL
+# Start gateway only — skip the local postgres service
+docker compose up gateway
+```
+
+**With a pinned registry image (recommended for staging/prod):**
+
+```bash
+# Create an override file
+cat > docker-compose.prod.yml <<EOF
+services:
+  gateway:
+    image: ghcr.io/clops-dev/zen-gateway:abc1234   # replace with your SHA
+    build: !reset null
+EOF
+
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+---
+
+### Stop
+
+Graceful shutdown respects in-flight requests:
+
+```bash
+# Graceful stop — sends SIGTERM, waits up to 30s for drain, then SIGKILL
+docker compose stop
+
+# Or for a single container:
+docker stop zen-gateway   # respects SHUTDOWN_DRAIN_MS (default: 25s)
+```
+
+**What happens on `docker stop`:**
+
+```
+docker stop
+    ↓
+SIGTERM received by Bun process
+    ↓
+Mark not-ready (/readyz returns 503 immediately)
+    ↓
+Sleep SHUTDOWN_DRAIN_MS (default 25s) — in-flight requests complete
+    ↓
+server.stop(true)  — close HTTP server
+    ↓
+sql.end()          — close Postgres pool (5s timeout)
+    ↓
+process.exit(0)
+```
+
+If a **second signal** arrives during the drain (e.g. operator impatience),
+the process exits immediately with code 1.
+
+> **Note**: Graceful shutdown behaviour is implemented in `src/index.ts` and
+> verified by code review. Runtime validation on Linux requires Docker, which
+> is not available in this environment — see Phase 2 Blocked Tests.
+
+---
+
+### Logs
+
+```bash
+# Follow structured JSON logs
+docker compose logs -f gateway
+
+# Last 100 lines
+docker compose logs --tail=100 gateway
+
+# Parse with jq (install separately)
+docker compose logs -f gateway | jq -r '. | "\(.time) [\(.level)] \(.msg)"'
+
+# Filter by level
+docker compose logs -f gateway | jq 'select(.level == "error")'
+
+# Filter by request ID (for debugging a specific request)
+docker compose logs gateway | jq 'select(.request_id == "YOUR_REQUEST_ID")'
+```
+
+Log format (structured JSON, one line per event):
+
+```json
+{
+  "time": "2026-08-19T12:00:00.000Z",
+  "level": "info",
+  "msg": "http_request",
+  "env": "production",
+  "service": "zen-gateway",
+  "version": "1.0.0",
+  "git_sha": "abc1234",
+  "request_id": "a1b2c3d4...",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "ip": "10.0.0.1"
+}
+```
+
+---
+
+### Health
+
+| Endpoint | Purpose | DB check | Used by |
+|----------|---------|----------|---------|
+| `/livez` | Liveness — process is alive | ❌ No | Docker healthcheck, orchestrator restart |
+| `/readyz` | Readiness — can serve traffic | ✅ Yes | Load balancer traffic gate |
+| `/healthz` | Legacy (backward compat) | ✅ Yes | Existing operators |
+| `/version` | Build metadata | ❌ No | Ops verification after deploy |
+
+**`/livez`** — Always returns `200 OK` if the process is running:
+```json
+{"ok": true, "timestamp": "2026-08-19T12:00:00.000Z"}
+```
+
+**`/readyz`** — Returns `200 OK` when ready, `503` when draining or DB is down:
+```json
+{"ready": true, "db": "ok", "timestamp": "2026-08-19T12:00:00.000Z"}
+```
+```json
+{"ready": false, "reason": "draining_for_SIGTERM", "db": "unknown", "timestamp": "..."}
+```
+
+**`/version`** — Build identity for post-deploy verification:
+```json
+{
+  "name": "zen-gateway",
+  "version": "1.0.0",
+  "git_sha": "abc1234",
+  "node_env": "production",
+  "bun": "1.3.14",
+  "timestamp": "2026-08-19T12:00:00.000Z"
+}
+```
+
+**`/healthz`** — Legacy endpoint, DB-coupled. Kept for backward compatibility.
+New tooling should use `/readyz` instead.
+
+---
+
+### Configuration
+
+All configuration is via environment variables. Set these in `.env.production`
+(gitignored) or inject via your orchestrator.
+
+#### Required
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DATABASE_URL` | PostgreSQL connection string (Neon URL in production) | `postgresql://user:pass@host/db?sslmode=require` |
+| `SESSION_SECRET` | ≥32-char hex string for cookie signing | `openssl rand -hex 32` |
+| `ADMIN_EMAIL` | Bootstrap admin account email | `admin@yourdomain.com` |
+| `ADMIN_PASSWORD` | Bootstrap admin password (≥8 chars) | `change-me-on-first-login` |
+
+> ⚠️ `ADMIN_PASSWORD` is only used on first boot to create the admin account
+> if no admin exists yet. After first login, change it via the dashboard.
+
+#### Optional — AI Provider Bootstrap
+
+These are convenience env vars for first-boot key seeding.
+The admin dashboard is the source of truth once keys are set.
+
+| Variable | Description |
+|----------|-------------|
+| `OPENROUTER_API_KEY` | Copied into the OpenRouter provider row on first boot if the row has no key yet |
+| `ANTHROPIC_AUTH_TOKEN` | Copied into the agentrouter (Anthropic-compatible) provider row on first boot |
+| `AGENTROUTER_API_KEY` | Copied into the agentrouter (OpenAI-compatible) provider row on first boot |
+| `ANTHROPIC_BASE_URL` | Override base URL for the Anthropic-compatible agentrouter (default: `https://agentrouter.org`) |
+
+#### Optional — Tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8787` | HTTP listen port |
+| `LOG_LEVEL` | `info` | Log verbosity: `trace` \| `debug` \| `info` \| `warn` \| `error` \| `fatal` |
+| `BCRYPT_COST` | `12` | bcrypt cost factor for password hashing (4–15) |
+| `DEFAULT_FREE_TOKEN_BUDGET` | `50000` | Monthly token budget for new free-tier users |
+| `SHUTDOWN_DRAIN_MS` | `25000` | How long (ms) to drain in-flight requests after SIGTERM |
+| `APP_URL` | `http://localhost:8787` | Public URL sent as `HTTP-Referer` to OpenRouter |
+| `WEB_URL` | _(derived)_ | Public web URL for device auth verification links |
+| `CORS_ALLOWED_ORIGINS` | _(empty)_ | Comma-separated CORS origins for the admin SPA |
+
+#### Optional — Upstream Timeouts
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UPSTREAM_TIMEOUT_MS_NON_STREAMING` | `30000` | Per-call deadline for non-streaming requests (ms) |
+| `UPSTREAM_CONNECT_TIMEOUT_MS` | `10000` | TCP+TLS connect budget for streaming requests (ms) |
+| `UPSTREAM_FIRST_TOKEN_TIMEOUT_MS` | `120000` | Time from request start to first token in stream (ms) |
+| `UPSTREAM_IDLE_TIMEOUT_MS_STREAMING` | `120000` | Max silence between chunks in a stream (ms) |
+| `UPSTREAM_MAX_STREAM_DURATION_MS` | `600000` | Hard max for any stream regardless of chunk activity (ms) |
+
+#### Production-only
+
+| Variable | Notes |
+|----------|-------|
+| `DATABASE_URL` | Must point to Neon (or another managed PG) in production, not the local Compose PG |
+| `NODE_ENV` | Set to `production` in the Dockerfile; do not override |
+| `VERSION` + `GIT_SHA` | Set at Docker build time via `--build-arg`; do not override at runtime |
+
+#### Development-only
+
+| Variable | Notes |
+|----------|-------|
+| `DATABASE_URL` | Can point to `postgresql://zen:zen@localhost:5432/zen` (local Compose PG) |
+| `LOG_LEVEL=debug` | Verbose logging, includes stack traces in error logs |
+
+---
+
+### Database
+
+**Production:** Zen Gateway uses [Neon](https://neon.tech) managed PostgreSQL.
+
+**Migrations:** Run automatically on every boot via `src/lib/migrate.ts`.
+The migration runner is idempotent — it tracks applied migrations in a
+`schema_migrations` table and skips already-applied ones.
+
+```
+[migrate] applied 3 migration(s): 001_init.sql, 002_..., 003_...
+```
+
+Migration files live in `migrations/`. They are copied into the Docker image
+and run by the gateway process on startup — you do not need a separate
+migration step in your deploy pipeline.
+
+**Local Postgres** (development only):
+
+```bash
+# Start local PG only
+docker compose up postgres -d
+
+# Connect with psql
+docker exec -it zen-postgres psql -U zen -d zen
+
+# Run migrations manually (requires a running gateway or bun env)
+DATABASE_URL=postgresql://zen:zen@localhost:5432/zen bun run src/index.ts
+```
+
+---
+
+### Troubleshooting
+
+**Gateway exits immediately on startup:**
+
+```
+[migrate] FAILED: ECONNREFUSED
+```
+
+→ Database is not reachable. Check `DATABASE_URL` and ensure Neon/Postgres is up.
+The gateway exits with code 1 if migrations fail — this is intentional.
+
+**Gateway starts but `/readyz` returns 503:**
+
+```json
+{"ready": false, "reason": "db_unreachable"}
+```
+
+→ Migrations succeeded (DB was reachable at boot) but subsequent DB probes are failing.
+Check your connection pool limit on Neon and network connectivity.
+
+**`/livez` returns 200 but `/readyz` returns 503 during shutdown:**
+
+This is correct behaviour. SIGTERM marks the gateway not-ready immediately
+so the load balancer stops routing new requests. The gateway then drains for
+`SHUTDOWN_DRAIN_MS` before exiting.
+
+**Admin SPA (`/admin2`) shows "Built bundle not found":**
+
+The admin SPA is built during `docker build`. If you're running the backend
+directly (`bun run start`) without building the admin:
+
+```bash
+cd admin && bun install && bun run build && cd ..
+bun run start
+```
+
+**High memory usage:**
+
+The default limit is 1 GB. If you're handling many concurrent streams, increase
+the limit in `docker-compose.yml` under `deploy.resources.limits.memory`.
+
+**Session cookies not working after restart:**
+
+If `SESSION_SECRET` changed, all existing sessions are invalidated. Users will
+need to log in again. Keep `SESSION_SECRET` stable across deployments.
+
+---
+
+### Deployment
+
+**Recommended production deployment flow:**
+
+```
+1. Push to main branch
+       ↓
+2. CI runs (GitHub Actions):
+   - Secret scan
+   - Typecheck
+   - Tests
+   - Docker build → tagged zen-gateway:<git-sha>
+   - Trivy security scan
+       ↓
+3. (Phase 3) Push image to registry:
+   ghcr.io/clops-dev/zen-gateway:<git-sha>
+       ↓
+4. Deploy to VM:
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d gateway
+       ↓
+5. Verify deployment:
+   curl https://gateway.yourdomain.com/version
+   curl https://gateway.yourdomain.com/readyz
+       ↓
+6. Update load balancer to route traffic to new instance
+```
+
+**Rollback:**
+
+```bash
+# Tag known-good image for reference
+docker tag zen-gateway:<previous-sha> zen-gateway:rollback
+
+# Update the override file to point to the previous SHA
+# Edit docker-compose.prod.yml: image: ghcr.io/clops-dev/zen-gateway:<previous-sha>
+
+# Re-deploy
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d gateway
+
+# Verify
+curl https://gateway.yourdomain.com/version
+```
+
+Rollback is safe because:
+1. Migrations are additive (no destructive DDL without careful review)
+2. The gateway is stateless (sessions are in cookies, data is in Postgres)
+3. Each deployment has an immutable git-SHA tag
+
+---
+
+### Security
+
+- Provider API keys are stored in the Postgres `providers` table (plaintext).
+  Restrict DB grants if you give others DB access, or add pgcrypto encryption.
+- See `SECURITY.md` for a known credential exposure in the git history
+  that requires immediate credential rotation.

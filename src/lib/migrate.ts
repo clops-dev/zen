@@ -76,41 +76,35 @@ async function runMigrationsOnce(): Promise<{ applied: string[] }> {
     )
   }
 
-  const applied = await sql<{ filename: string }[]>`SELECT filename FROM schema_migrations`
-  const appliedSet = new Set(applied.map((r) => r.filename))
-
+  // Use a transactional advisory lock (lock key: 74839281) across the entire
+  // migration sequence so that when N gateway replicas boot simultaneously,
+  // exactly one node executes the migration check-and-apply transaction while
+  // other nodes wait safely. The lock automatically releases on commit/abort.
   const newly: string[] = []
-  for (const file of files) {
-    if (appliedSet.has(file)) continue
-    const body = await readFile(path.join(migrationsDir, file), "utf8")
-    // Each migration file may contain multiple statements (DO blocks,
-    // ALTER TABLE, RAISE NOTICE, etc). The postgres driver refuses
-    // `BEGIN`/`COMMIT` inside `sql.unsafe` — it manages its own
-    // transactions on the pooled connection. Instead, run the whole
-    // script inside an explicit `sql.begin` block so multi-statement
-    // scripts execute as a single transaction and intermediate result
-    // sets (RAISE, etc.) don't surface as "more than one row" to the
-    // single-statement caller.
-    try {
-      await sql.begin(async (tx) => {
+  await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(74839281)`
+
+    const applied = await tx<{ filename: string }[]>`SELECT filename FROM schema_migrations`
+    const appliedSet = new Set(applied.map((r) => r.filename))
+
+    for (const file of files) {
+      if (appliedSet.has(file)) continue
+      const body = await readFile(path.join(migrationsDir, file), "utf8")
+      try {
         await tx.unsafe(body)
-      })
-    } catch (err) {
-      // Wrap with the filename so the boot log makes it obvious WHICH
-      // migration failed. Without this, the boot log just shows
-      // "[migrate] FAILED: relation already exists" etc with no clue
-      // which file to look at.
-      const wrapped = new Error(
-        `migration ${file} failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
-      ;(wrapped as any).cause = err
-      ;(wrapped as any).migrationFile = file
-      throw wrapped
+      } catch (err) {
+        const wrapped = new Error(
+          `migration ${file} failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+        ;(wrapped as any).cause = err
+        ;(wrapped as any).migrationFile = file
+        throw wrapped
+      }
+      await tx`INSERT INTO schema_migrations (filename) VALUES (${file}) ON CONFLICT (filename) DO NOTHING`
+      newly.push(file)
+      console.log(`[migrate] applied ${file}`)
     }
-    await sql`INSERT INTO schema_migrations (filename) VALUES (${file}) ON CONFLICT (filename) DO NOTHING`
-    newly.push(file)
-    console.log(`[migrate] applied ${file}`)
-  }
+  })
 
   return { applied: newly }
 }

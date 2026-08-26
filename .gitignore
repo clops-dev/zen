@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# Zen Gateway — .gitignore
+#
+# IMPORTANT: .env was committed in the repository's initial commit and
+# contains live credentials. Those credentials must be rotated immediately.
+# See SECURITY.md for remediation steps.
+#
+# Going forward, all secret files are excluded below.
+# ---------------------------------------------------------------------------
+
+# ── Secrets / environment files ────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+.env.development
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+
+# ── Dependencies ───────────────────────────────────────────────────────────
+node_modules/
+admin/node_modules/
+
+# ── Build outputs ──────────────────────────────────────────────────────────
+admin/dist/
+admin/.vite/
+dist/
+
+# ── TypeScript build info (reproducible — do not commit) ──────────────────
+tsconfig.tsbuildinfo
+admin/tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── OS / editor artifacts ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Bun cache ──────────────────────────────────────────────────────────────
+.bun/
+
+# ── Kilo (AI assistant state) ─────────────────────────────────────────────
+.kilo/
+
+# ── Ad-hoc test / scratch scripts (not unit tests) ────────────────────────
+# These live in the repo root and are not part of the test suite.
+test-ai.ts
+test-ai-source.ts
+test-ai-types.ts
+test-errors-script.ts
+test-hy3.ts
+test-models.ts
+test-stream.ts
+test-stream2.ts
+test-toolcall.ts
+test-zod.ts
+check_models.ts

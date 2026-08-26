@@ -3,6 +3,8 @@ import { env } from "./lib/env"
 import { runMigrations } from "./lib/migrate"
 import { sql } from "./lib/db"
 import { hashPassword } from "./lib/password"
+import { log } from "./lib/logger"
+import { setReady } from "./lib/readiness"
 
 /** Format any thrown value into a useful single-line string. Used by
  * boot-time bootstrap handlers so we never log "[stage] failed:
@@ -183,8 +185,72 @@ console.log(`zen-gateway listening on :${env.PORT}`)
 // last-resort backstop well above both app-level timers.
 const bunIdleTimeoutSeconds = Math.ceil(env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING / 1000) + 15
 
-export default {
+// ---------------------------------------------------------------------------
+// Graceful shutdown.
+//
+// On SIGTERM (orchestrator stop / docker stop / kubectl delete pod) or
+// SIGINT (Ctrl-C in dev) we:
+//   1. Mark this replica not-ready so the load balancer pulls us out of
+//      rotation immediately. /readyz starts returning 503.
+//   2. Sleep for SHUTDOWN_DRAIN_MS so any in-flight request has a chance
+//      to finish. New requests during this window get a 503 from /readyz
+//      (the LB already pulled us out, but in case any request sneaks in
+//      via keep-alive on an existing connection).
+//   3. Close the Postgres pool. Any subsequent query fails fast, which
+//      is the correct behaviour — we're exiting.
+//   4. process.exit(0) with the configured code.
+//
+// SHUTDOWN_DRAIN_MS must be less than the orchestrator's
+// terminationGracePeriodSeconds (Compose default: 10s, Kubernetes
+// default: 30s). The 25s default fits both.
+//
+// If a second signal arrives during the drain, exit immediately so the
+// orchestrator doesn't have to SIGKILL us.
+// ---------------------------------------------------------------------------
+const SHUTDOWN_DRAIN_MS = (() => {
+  const raw = process.env.SHUTDOWN_DRAIN_MS
+  if (!raw) return 25_000
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : 25_000
+})()
+
+let shuttingDown = false
+function installShutdown(server: { stop: (closeActiveConnections?: boolean) => Promise<void> }) {
+  const onSignal = (signal: NodeJS.Signals | "SIGINT") => {
+    if (shuttingDown) {
+      console.warn(`[shutdown] received second ${signal}, forcing exit`)
+      process.exit(1)
+    }
+    shuttingDown = true
+    setReady(false, `draining_for_${signal}`)
+    console.log(`[shutdown] ${signal} received, draining for ${SHUTDOWN_DRAIN_MS}ms`)
+    const drainTimer = setTimeout(async () => {
+      try {
+        await server.stop(true)
+        console.log("[shutdown] server stopped")
+      } catch (err) {
+        console.error("[shutdown] server.stop failed:", err)
+      }
+      try {
+        await sql.end({ timeout: 5 })
+        console.log("[shutdown] postgres pool closed")
+      } catch (err) {
+        console.error("[shutdown] postgres pool close failed:", err)
+      }
+      console.log("[shutdown] exit 0")
+      process.exit(0)
+    }, SHUTDOWN_DRAIN_MS)
+    // Don't keep the event loop alive just for the drain timer.
+    drainTimer.unref()
+  }
+  process.on("SIGTERM", () => onSignal("SIGTERM"))
+  process.on("SIGINT", () => onSignal("SIGINT"))
+}
+
+const server = Bun.serve({
   port: env.PORT,
   fetch: app.fetch,
   idleTimeout: bunIdleTimeoutSeconds,
-}
+})
+
+installShutdown(server)

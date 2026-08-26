@@ -1,0 +1,63 @@
+# ---------------------------------------------------------------------------
+# Docker build context exclusions for Zen Gateway.
+#
+# Order matters — rules are evaluated top-to-bottom, last match wins.
+# ---------------------------------------------------------------------------
+
+# ── Secrets — NEVER in the image ──────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Git metadata ──────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+
+# ── CI / GitHub ────────────────────────────────────────────────────────────
+.github
+
+# ── Dependencies (reinstalled in build stage) ─────────────────────────────
+node_modules
+admin/node_modules
+
+# ── Build outputs ─────────────────────────────────────────────────────────
+admin/dist
+admin/.vite
+
+# ── TypeScript build info ─────────────────────────────────────────────────
+tsconfig.tsbuildinfo
+admin/tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# ── Editor / OS artifacts ─────────────────────────────────────────────────
+.DS_Store
+.idea
+.vscode
+*.swp
+*.swo
+.kilo
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+*.log
+
+# ── Bun cache ──────────────────────────────────────────────────────────────
+.bun
+
+# ── Ad-hoc test / scratch scripts (not bun test suite) ────────────────────
+check_models.ts
+test-ai.ts
+test-ai-source.ts
+test-ai-types.ts
+test-errors-script.ts
+test-hy3.ts
+test-models.ts
+test-stream.ts
+test-stream2.ts
+test-toolcall.ts
+test-zod.ts
+
+# ── Documentation ──────────────────────────────────────────────────────────
+# README.md and SECURITY.md are excluded — they're not needed at runtime.
+README.md
+SECURITY.md

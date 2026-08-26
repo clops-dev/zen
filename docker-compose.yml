@@ -1,0 +1,214 @@
+# -----------------------------------------------------------------------------
+# Zen Gateway — production compose.
+#
+# Architecture decision — PostgreSQL vs Neon:
+# ─────────────────────────────────────────────
+# Production database: Neon PostgreSQL (https://neon.tech)
+#   - The gateway's DATABASE_URL in production points to a Neon connection
+#     pooler endpoint, NOT to this local Postgres service.
+#   - Neon handles HA, backups, point-in-time recovery, and branching.
+#   - This stack is NOT the production database topology:
+#
+#       ❌ incorrect assumption:
+#           Gateway VM → local Postgres (this file)
+#
+#       ✅ correct production topology:
+#           Load Balancer
+#                │
+#         ┌──────┴──────┐
+#         ▼             ▼
+#     Gateway VM1   Gateway VM2   (stateless — identical config)
+#         │             │
+#         └──────┬──────┘
+#                ▼
+#           Neon PostgreSQL  ← cloud-managed, NOT this stack
+#
+#   - Set DATABASE_URL in .env.production to your Neon connection string.
+#     The `postgres:` service below is only used for local dev/testing.
+#
+# Local development / integration testing:
+#   When running `docker compose up` locally (without .env.production),
+#   the gateway falls back to the local `postgres:` service. This lets
+#   you test end-to-end without a cloud dependency. The local PG has NO
+#   persistent data guarantees across host-level wipes — use Neon for
+#   anything you care about.
+#
+# Topology (this file):
+#   gateway (zen-gateway) — Bun HTTP service, stateless
+#   postgres              — local PG for dev/testing only (Neon in prod)
+#
+# Design notes:
+#   - Gateway image expected from a registry in staging/prod. Override:
+#       image: ghcr.io/<org>/zen-gateway:<git-sha>
+#     via an environment-specific override file (see docs/deployment.md).
+#     The build: block here is for `docker compose up` from the repo.
+#   - Two named volumes for Postgres: data + WAL live on host-managed
+#     volumes so DB state survives container restarts.
+#   - depends_on with service_healthy lets the gateway wait for PG to
+#     be ready before starting. This is NOT the retry loop — the gateway
+#     also handles transient DB errors at runtime (see db.ts).
+#   - Secrets come from .env.production (mounted read-only). Never
+#     hardcoded here. Never baked into images.
+#   - No `ports:` on postgres — only the gateway is reachable from
+#     the host network. Postgres stays on the internal `zen-net` bridge.
+#   - restart: unless-stopped provides host-level process supervision
+#     on a single node. HA comes from N replicas behind a load balancer.
+#   - Logs are bounded to prevent unbounded disk growth.
+#   - Resource limits are conservative single-node baselines; tune via
+#     override files for your actual VM specs.
+# -----------------------------------------------------------------------------
+
+services:
+  gateway:
+    # In production override `image:` to a pinned registry tag (git SHA).
+    # The `build:` block is kept here so `docker compose up` works out-of-the-box
+    # for local development. Production runners should NOT depend on this build.
+    #
+    # Production override example (docker-compose.prod.yml):
+    #   services:
+    #     gateway:
+    #       image: ghcr.io/clops-dev/zen-gateway:abc1234
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # These become the VERSION and GIT_SHA env vars inside the container,
+        # surfaced at /version. In CI, pass the real git SHA and package version.
+        VERSION: dev
+        GIT_SHA: local
+    image: zen-gateway:dev
+    container_name: zen-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # ── Required at runtime ────────────────────────────────────────────
+      PORT: "8787"
+      NODE_ENV: "production"
+
+      # ── Optional tunables ─────────────────────────────────────────────
+      # How long (ms) to drain in-flight requests after SIGTERM before
+      # exiting. Keep below the orchestrator's terminationGracePeriodSeconds.
+      # Docker default stop timeout is 10s; we use 25s here and must set
+      # `stop_grace_period: 30s` below to give Compose time to wait.
+      SHUTDOWN_DRAIN_MS: "25000"
+
+      # Comma-separated CORS origins for the admin SPA.
+      # Empty = same-origin only. Set in .env.production for cross-origin.
+      CORS_ALLOWED_ORIGINS: ""
+
+      # Structured log level: trace | debug | info | warn | error | fatal
+      LOG_LEVEL: "info"
+
+    env_file:
+      # .env.production must exist in production deployments and must contain:
+      #   DATABASE_URL=<neon-connection-string>
+      #   SESSION_SECRET=<64-char hex>
+      #   ADMIN_EMAIL=<admin@yourdomain.com>
+      #   ADMIN_PASSWORD=<strong-password>
+      # It must NOT contain:
+      #   - provider API keys baked in (set these via the admin dashboard)
+      # See .env.example for the full schema.
+      - path: ./.env.production
+        required: false
+
+    ports:
+      # Bind to loopback only — a reverse proxy (nginx/Caddy/HAProxy) should
+      # be in front of this in production, not exposing port 8787 directly.
+      - "127.0.0.1:8787:8787"
+    networks:
+      - zen-net
+
+    # Graceful stop: give the drain period time to complete.
+    # SHUTDOWN_DRAIN_MS=25000 means we need > 25s of stop grace.
+    stop_grace_period: 30s
+
+    healthcheck:
+      # Liveness only — does not touch Postgres. Mirrors the Dockerfile HEALTHCHECK.
+      # Readiness (Postgres check) is at /readyz — use that on your load balancer.
+      test: ["CMD", "bun", "-e", 'fetch("http://127.0.0.1:8787/livez").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1024M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # Local PostgreSQL — development and integration testing ONLY.
+  #
+  # Production uses Neon PostgreSQL. This service exists so you can run
+  # `docker compose up` and get a working stack without a cloud account.
+  #
+  # The DATABASE_URL for this service is:
+  #   postgresql://zen:zen@postgres:5432/zen
+  # (available inside the zen-net bridge; the host sees nothing on 5432)
+  #
+  # To use Neon instead:
+  #   1. Set DATABASE_URL in .env.production to your Neon pooler URL.
+  #   2. Remove or comment out `depends_on` on the gateway service.
+  #   3. Run: docker compose up gateway   (skip the postgres service)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: zen-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zen
+      POSTGRES_PASSWORD: zen
+      POSTGRES_DB: zen
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - zen-net
+    # Postgres stays on the internal network only — never published to the host.
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zen -d zen"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+networks:
+  zen-net:
+    driver: bridge
+    # Disable ICC to prevent containers from reaching each other except
+    # via explicitly published ports / depends_on networking.
+    # Note: icc: false requires Linux host; comment out on macOS/Windows.
+    # icc: false
+
+volumes:
+  pgdata:
+    name: zen-pgdata
+    # External: false (default) means Compose manages this volume.
+    # In production, consider: external: true + pre-create the volume
+    # with appropriate backup tooling attached.

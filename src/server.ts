@@ -4,34 +4,69 @@ import { deviceAuth } from "./routes/device-auth"
 import { gateway } from "./routes/gateway"
 import { web } from "./routes/web"
 import { adminApi } from "./routes/admin-api"
+import { requestId } from "./middleware/request-id"
+import { readyz } from "./lib/readiness"
+import { log } from "./lib/logger"
 
-import { sql } from "./lib/db"
+import { sql, withDbResilience, isTransientDbError } from "./lib/db"
 import { existsSync, statSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const app = new Hono()
 
+// Request-id is first so every other middleware and every log line can
+// stamp the same correlation id. Mount it before the routes (which don't
+// add it themselves).
+app.use("*", requestId())
+
+// ---------------------------------------------------------------------------
+// Health / readiness endpoints.
+//
+//   /livez   — liveness. Process is alive and answering HTTP. Does NOT
+//              touch the DB. Orchestrators/HAProxy use this to decide
+//              whether to restart the container.
+//   /readyz  — readiness. Process can serve user traffic. False during
+//              graceful shutdown (so the LB stops sending new requests)
+//              and false if Postgres is unreachable. LB uses this to
+//              gate traffic.
+//   /healthz — legacy. Same shape as before (DB-coupled); kept for
+//              backwards compatibility with existing operators.
+//   /version — build metadata for ops verification.
+// ---------------------------------------------------------------------------
+app.get("/livez", (c) => c.json({ ok: true, timestamp: new Date().toISOString() }))
+
+app.get("/readyz", async (c) => {
+  const r = await readyz()
+  return c.json({ ...r, timestamp: new Date().toISOString() }, r.ready ? 200 : 503)
+})
+
+app.get("/version", (c) => c.json({
+  name: "zen-gateway",
+  version: process.env.VERSION ?? "dev",
+  git_sha: process.env.GIT_SHA ?? "unknown",
+  node_env: process.env.NODE_ENV ?? "development",
+  bun: typeof Bun !== "undefined" ? Bun.version : null,
+  timestamp: new Date().toISOString(),
+}))
+
 app.get("/healthz", async (c) => {
   let dbOk = false
-  const q = sql`SELECT 1`
+  let dbError: string | null = null
   try {
-    await Promise.race([
-      q,
-      new Promise((_, reject) => setTimeout(() => {
-        q.cancel()
-        reject(new Error("timeout"))
-      }, 2000))
-    ])
+    await withDbResilience(() => sql`SELECT 1`)
     dbOk = true
   } catch (err) {
-    console.error("[zen-gateway] /healthz db check failed:", err)
+    dbError = err instanceof Error ? err.message : String(err)
+    log.error("/healthz db check failed", { request_id: c.get("requestId") }, err)
   }
 
   const ok = dbOk
   return c.json({
     ok,
     db: dbOk ? "ok" : "error",
+    ...(dbError ? { db_error: dbError } : {}),
+    transient_db_error: dbError ? isTransientDbError(new Error(dbError)) : false,
     timestamp: new Date().toISOString()
   }, ok ? 200 : 503)
 })
@@ -39,7 +74,7 @@ app.get("/healthz", async (c) => {
 app.get("/", (c) => c.redirect("/login", 303))
 
 app.onError((err, c) => {
-  console.error("[zen-gateway] unhandled error:", err)
+  log.error("unhandled_error", { request_id: c.get("requestId"), path: c.req.path }, err)
   const accept = c.req.header("Accept") ?? ""
   if (accept.includes("text/html")) {
     return c.html(

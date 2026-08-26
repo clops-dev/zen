@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import { z } from "zod"
-import { sql } from "../lib/db"
+import { sql, withDbResilience } from "../lib/db"
 import { requireAdmin } from "../middleware/session-auth"
 import { audit, actorEmailFor } from "../lib/audit"
 
@@ -1462,6 +1462,6 @@ adminApi.get("/settings", async (c) => {
 
 adminApi.get("/me", async (c) => {
   const session = c.var.session
-  const [u] = await sql`SELECT id, email, role FROM users WHERE id = ${session.userId}`
+  const [u] = await withDbResilience(() => sql`SELECT id, email, role FROM users WHERE id = ${session.userId}`)
   return c.json({ user: u })
 })

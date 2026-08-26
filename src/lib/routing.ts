@@ -1,4 +1,4 @@
-import { sql } from "./db"
+import { sql, withDbResilience } from "./db"
 import type { ComplexityTier } from "./db"
 
 const TIER_ORDER: ComplexityTier[] = ["trivial", "simple", "medium", "complex"]
@@ -98,7 +98,7 @@ function weightedPick<T extends { weight: number }>(items: T[]): T | null {
 
 async function getTierCandidates(tier: ComplexityTier): Promise<Candidate[]> {
   const now = Date.now()
-  const rows = await sql<Candidate[]>`
+  const rows = await withDbResilience(() => sql<Candidate[]>`
     SELECT
       m.id AS model_row_id, p.id AS provider_id, p.name AS provider_name,
       p.base_url, p.api_key, m.model_id,
@@ -111,7 +111,7 @@ async function getTierCandidates(tier: ComplexityTier): Promise<Candidate[]> {
     JOIN models m ON m.id = tr.model_id
     JOIN providers p ON p.id = m.provider_id
     WHERE tr.tier = ${tier} AND tr.enabled = true AND m.enabled = true AND p.enabled = true
-  ` as any
+  `) as any
   return rows.filter(
     (r: any) => r.healthy || (r.last_failure_at && now - new Date(r.last_failure_at).getTime() > COOLDOWN_MS),
   )
@@ -122,7 +122,7 @@ async function getTierCandidates(tier: ComplexityTier): Promise<Candidate[]> {
  * provider + one model, before you've configured per-tier routing. */
 async function getAnyCandidate(): Promise<Candidate[]> {
   const now = Date.now()
-  const rows = await sql<Candidate[]>`
+  const rows = await withDbResilience(() => sql<Candidate[]>`
     SELECT
       m.id AS model_row_id, p.id AS provider_id, p.name AS provider_name,
       p.base_url, p.api_key, m.model_id,
@@ -134,7 +134,7 @@ async function getAnyCandidate(): Promise<Candidate[]> {
     FROM models m
     JOIN providers p ON p.id = m.provider_id
     WHERE m.enabled = true AND p.enabled = true
-  ` as any
+  `) as any
   return rows.filter(
     (r: any) => r.healthy || (r.last_failure_at && now - new Date(r.last_failure_at).getTime() > COOLDOWN_MS),
   )
@@ -308,16 +308,16 @@ export async function pickRoute(
 export async function reportRouteOutcome(providerId: string, success: boolean): Promise<void> {
   try {
     if (success) {
-      await sql`UPDATE providers SET healthy = true, consecutive_failures = 0 WHERE id = ${providerId}`
+      await withDbResilience(() => sql`UPDATE providers SET healthy = true, consecutive_failures = 0 WHERE id = ${providerId}`)
       return
     }
-    await sql`
+    await withDbResilience(() => sql`
       UPDATE providers
       SET consecutive_failures = consecutive_failures + 1,
           last_failure_at = now(),
           healthy = (consecutive_failures + 1) < ${FAILURE_THRESHOLD}
       WHERE id = ${providerId}
-    `
+    `)
   } catch (err) {
     console.error("[routing] failed to report outcome:", err)
   }

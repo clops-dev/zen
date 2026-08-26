@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import { z } from "zod"
-import { sql } from "../lib/db"
+import { sql, withDbResilience } from "../lib/db"
 import { requireApiKey } from "../middleware/api-key"
 import { rateLimit } from "../middleware/rate-limit"
 import { classifyComplexity } from "../lib/complexity"
@@ -52,6 +52,71 @@ function failureReason(err: unknown): string {
   if (c.action === "skip_candidate") return `non_retryable_for_candidate:${c.kind}: ${base}`
   const status = c.statusCode ? `(${c.statusCode}) ` : ""
   return `non_retryable:${c.kind}: ${status}${base}`
+}
+
+/** Safe per-message diagnostic. NEVER includes the actual content (could
+ * be PII / secrets). The provider only needs to know the SHAPE of the
+ * message that broke so we can fix the normalizer. */
+function safeMessageDiagnostic(m: any, index: number): string {
+  const role = m?.role ?? "unknown"
+  const content = m?.content
+  let contentType = "missing"
+  let contentLength = 0
+  let hasToolCalls = false
+  let hasToolResults = false
+  if (content == null) {
+    contentType = "null"
+  } else if (typeof content === "string") {
+    contentType = "string"
+    contentLength = content.length
+  } else if (Array.isArray(content)) {
+    contentType = "array"
+    contentLength = content.length
+    hasToolCalls = content.some((p: any) => p?.type === "tool-call")
+    hasToolResults = content.some((p: any) => p?.type === "tool-result")
+  } else {
+    contentType = typeof content
+  }
+  const toolCallsCount = Array.isArray(m?.tool_calls) ? m.tool_calls.length : 0
+  return `msg[${index}] role=${role} contentType=${contentType} contentLength=${contentLength} hasToolCalls=${hasToolCalls || toolCallsCount > 0} toolCallsCount=${toolCallsCount} hasToolResults=${hasToolResults}`
+}
+
+/** Returns a short, safe diagnostic string for inclusion in the log line —
+ * pure metadata, NEVER the prompts or tool bodies. */
+function rejectionExtras(err: unknown): string {
+  if (!err || typeof err !== "object") return ""
+  const e = err as any
+  if (typeof e.message === "string" && /invalid message at index/i.test(e.message)) {
+    const m = e.message.match(/invalid message at index\s+(\d+)/i)
+    if (m) {
+      // Optionally include the message's role if the AI SDK reported it
+      // alongside. We don't have the original message here, so just record
+      // the index. The full safe per-message diagnostic is logged separately
+      // when we shape the message list at request entry.
+      return ` invalidMessageIndex=${m[1]}`
+    }
+    return " invalidMessageIndex=unknown"
+  }
+  return ""
+}
+
+/** Best-effort: walk the request's messages and log safe diagnostics for any
+ * that LOOK suspicious (empty content, null, etc.) so we can correlate
+ * provider 400s to the normalizer. Called from the streaming branch when
+ * startResult.error suggests a bad message. Never logs content. */
+function logMessageDiagnostics(messages: any[], reason: string) {
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]
+    const content = m?.content
+    const isEmpty =
+      content == null ||
+      (typeof content === "string" && content.length === 0) ||
+      (Array.isArray(content) && content.length === 0)
+    const isAssistantNoTools = m?.role === "assistant" && !(Array.isArray(m?.tool_calls) && m.tool_calls.length > 0)
+    if (isEmpty && isAssistantNoTools) {
+      console.warn(`[gateway] suspicious outgoing message ${reason}: ${safeMessageDiagnostic(m, i)}`)
+    }
+  }
 }
 
 /** Map a break_loop classification to the HTTP status the client should
@@ -112,7 +177,7 @@ async function recordRequest(fields: {
   fromCache?: boolean
 }) {
   try {
-    await sql`
+    await withDbResilience(() => sql`
       INSERT INTO ai_requests (
         user_id, ip, model_label, prompt_hash, input_tokens, output_tokens,
         cost_usd, latency_ms, status, reject_reason, from_cache
@@ -121,19 +186,19 @@ async function recordRequest(fields: {
         ${fields.inputTokens ?? 0}, ${fields.outputTokens ?? 0}, ${fields.costUsd ?? 0},
         ${fields.latencyMs ?? null}, ${fields.status}, ${fields.rejectReason ?? null}, ${fields.fromCache ?? false}
       )
-    `
+    `)
   } catch (err) {
     console.error("[gateway] failed to log request:", err)
   }
 }
 
 gateway.get("/models", requireApiKey(), async (c) => {
-  const rows = await sql`
+  const rows = await withDbResilience(() => sql`
     SELECT p.name AS provider, m.model_id, m.label, m.context_window
     FROM models m JOIN providers p ON p.id = m.provider_id
     WHERE m.enabled = true AND p.enabled = true
     ORDER BY p.name, m.model_id
-  `
+  `)
   return c.json({
     object: "list",
     data: rows.map((r: any) => ({
@@ -287,6 +352,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           }))
           bg(setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens))
 
+          console.log(`[gateway] non-stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} latencyMs=${latencyMs} tokens=${result.inputTokens}+${result.outputTokens} status=success`)
           return c.json({
             id: `chatcmpl-${Date.now()}`,
             object: "chat.completion",
@@ -321,9 +387,15 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           //                     immediately and return the error to the
           //                     client.
           const classification = classifyProviderError(err)
+          const latencyMs = Date.now() - started
+          const rejectReason = (err as UpstreamTimeoutError)?.rejectReason
+          const extras = rejectionExtras(err)
           console.error(
-            `[gateway] ${target.label} failed (attempt ${attempt + 1}/${MAX_FALLBACK_ATTEMPTS}, ` +
-            `${classification.action}: ${classification.kind}):`,
+            `[gateway] non-stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
+            `latencyMs=${latencyMs} status=${classification.action}:${classification.kind}` +
+            (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
+            (rejectReason ? ` timeout=${rejectReason}` : "") +
+            extras,
             err,
           )
           lastErr = err
@@ -416,14 +488,24 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       const startResult = await streamStarted
 
       if (!startResult.ok) {
-        // Classify the failure into a loop-control action. See the
-        // non-streaming branch above for the three-action contract.
         const classification = classifyProviderError(startResult.error)
+        const latencyMs = Date.now() - started
+        const rejectReason = (startResult.error as UpstreamTimeoutError)?.rejectReason
+        const extras = rejectionExtras(startResult.error)
         console.error(
-          `[gateway] ${target.label} failed to start (attempt ${attempt + 1}/${MAX_FALLBACK_ATTEMPTS}, ` +
-          `${classification.action}: ${classification.kind}):`,
+          `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
+          `latencyMs=${latencyMs} status=${classification.action}:${classification.kind}` +
+          (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
+          (rejectReason ? ` timeout=${rejectReason}` : "") +
+          extras,
           startResult.error,
         )
+        // If the provider rejected a message in the conversation, log safe
+        // per-message diagnostics so we can correlate the index to the
+        // normalizer's output. Never logs content.
+        if (classification.action === "break_loop" && classification.kind === "bad_request") {
+          logMessageDiagnostics(messages as any[], "incoming_request")
+        }
         lastErr = startResult.error
         bg(reportRouteOutcome(target.providerId, false))
         bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(startResult.error) }))
@@ -437,6 +519,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       }
 
       // Committed — this target actually produced output, hand its response to the real client.
+      console.log(`[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} stream=committed firstTokenReceived=true elapsedMs=${Date.now() - started}`)
       bg((async () => {
         try {
           const result = await done
@@ -453,7 +536,16 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
         } catch (err) {
           // Mid-stream failure AFTER commit — cannot fall back at this point,
           // the client already has partial output from this model. Just log it.
-          console.error(`[gateway] ${target.label} failed mid-stream (post-commit):`, err)
+          const classification = classifyProviderError(err)
+          const rejectReason = (err as UpstreamTimeoutError)?.rejectReason
+          console.error(
+            `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
+            `status=${classification.action}:${classification.kind}` +
+            (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
+            (rejectReason ? ` timeout=${rejectReason}` : "") +
+            ` stage=mid_stream`,
+            err,
+          )
           await reportRouteOutcome(target.providerId, false)
           await recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: "mid_stream_failure: " + failureReason(err) })
         }

@@ -1,0 +1,34 @@
+# -----------------------------------------------------------------------------
+# Development override for docker-compose.
+#
+# Loaded automatically when present and you run `docker compose up`. To use
+# it explicitly: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up`.
+#
+# Differences from the production compose:
+#   - Publishes postgres on 127.0.0.1:5432 so you can connect with psql /
+#     pgAdmin from the host without exec-ing into the container.
+#   - Mounts the source tree so `bun --watch` can hot-reload backend changes.
+#   - Adds `admin/dev-server` so the Vite dev server can proxy /admin-api
+#     to the gateway.
+#   - Drops the strict restart policy / resource limits that exist for prod.
+# -----------------------------------------------------------------------------
+
+services:
+  gateway:
+    build:
+      target: runtime
+    command: ["bun", "run", "--watch", "src/index.ts"]
+    environment:
+      NODE_ENV: "development"
+    volumes:
+      - ./src:/app/src:ro
+      - ./migrations:/app/migrations:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./admin/src:/app/admin/src:ro
+      - ./admin/index.html:/app/admin/index.html:ro
+    ports:
+      - "127.0.0.1:8787:8787"
+
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"

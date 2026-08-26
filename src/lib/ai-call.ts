@@ -40,6 +40,49 @@ function mapToolChoice(tc?: any) {
   return undefined
 }
 
+/** Public helper: figure out what to actually send to the upstream given
+ * a candidate's capabilities. If the model can't handle tools, drop them
+ * (and `tool_choice`) entirely — providers that don't support tools will
+ * reject the request with a 400 otherwise. If the model is vision-capable
+ * we leave the user message alone; if not, image_url parts are stripped so
+ * the provider doesn't 400 on an unknown content type. Exported for
+ * unit testing without spinning up the full call. */
+export function adaptRequestForCapabilities(
+  messages: ModelMessage[],
+  tools: any[] | undefined,
+  toolChoice: any,
+  supportsTools: boolean,
+  supportsVision: boolean,
+): { messages: ModelMessage[]; tools?: any[]; toolChoice?: any } {
+  if (supportsTools) {
+    return { messages, tools, toolChoice }
+  }
+  // Drop tools + tool_choice — provider would 400 on either.
+  if (!supportsVision) {
+    // Also strip image_url parts from user messages so the provider
+    // doesn't 400 on an unknown content type either.
+    const stripped: ModelMessage[] = messages.map((m: any) => {
+      if (m.role !== "user" || !Array.isArray(m.content)) return m
+      const filtered = m.content.filter((p: any) =>
+        p && typeof p === "object" && p.type !== "image_url" && p.type !== "image",
+      )
+      if (filtered.length === 0) {
+        // The whole message was an image with no caption. Replace with
+        // a placeholder so the provider still gets a user turn.
+        return { ...m, content: "" }
+      }
+      if (filtered.length === m.content.length) return m
+      // If everything is plain text, flatten to a string for safety.
+      if (filtered.every((p: any) => p?.type === "text" || typeof p === "string")) {
+        return { ...m, content: filtered.map((p: any) => typeof p === "string" ? p : p.text).join("") }
+      }
+      return { ...m, content: filtered }
+    })
+    return { messages: stripped, tools: undefined, toolChoice: undefined }
+  }
+  return { messages, tools: undefined, toolChoice: undefined }
+}
+
 /**
  * Normalize tool call arguments into a properly JSON-serialized string
  * for the OpenAI wire format.
@@ -506,7 +549,11 @@ export async function callNonStreaming(
   tools?: any[],
   toolChoice?: any,
 ): Promise<CallResult> {
-  const { system, nonSystemMessages } = normalizeMessages(messages)
+  const adapted = adaptRequestForCapabilities(
+    messages, tools, toolChoice,
+    target.supportsTools, target.supportsVision,
+  )
+  const { system, nonSystemMessages } = normalizeMessages(adapted.messages as any)
   const timeoutMs = env.UPSTREAM_TIMEOUT_MS_NON_STREAMING
   const signal = newTimeoutSignal(timeoutMs)
 
@@ -517,8 +564,8 @@ export async function callNonStreaming(
       messages: nonSystemMessages,
       maxOutputTokens,
       temperature,
-      tools: mapTools(tools),
-      toolChoice: mapToolChoice(toolChoice),
+      tools: mapTools(adapted.tools),
+      toolChoice: mapToolChoice(adapted.toolChoice),
       maxRetries: 0, // the gateway's own fallback loop retries across DIFFERENT models — no benefit to ai-sdk also retrying the same rate-limited one with backoff
       abortSignal: signal,
     })
@@ -533,7 +580,7 @@ export async function callNonStreaming(
       outputTokens: result.usage.outputTokens ?? 0,
     }
   } catch (err) {
-    if (isTimeoutError(err)) throw new UpstreamTimeoutError(timeoutMs, err)
+    if (isTimeoutError(err)) throw new UpstreamTimeoutError(timeoutMs, err, "timeout:non_streaming")
     throw err
   }
 }
@@ -544,14 +591,33 @@ export async function callNonStreaming(
  *   (Fetch API requires the stream to exist up front) but the caller MUST
  *   NOT hand this back to the real HTTP client until `started` resolves ok.
  * - `started` — resolves `{ ok: true }` the moment real content (a text
- *   delta or tool call) actually arrives from upstream, or `{ ok: false,
- *   error }` if the call fails or completes with zero output before that.
- *   This is the fallback gate: gateway.ts awaits this per attempt; on
- *   failure it discards this response entirely and tries the next model,
- *   so the client only ever sees output from whichever model actually
- *   worked — never a failed attempt, never two models' output mixed.
+ *   delta, reasoning delta, or tool call) actually arrives from upstream,
+ *   or `{ ok: false, error }` if the call fails or completes with zero
+ *   output before that. This is the fallback gate: gateway.ts awaits this
+ *   per attempt; on failure it discards this response entirely and tries
+ *   the next model, so the client only ever sees output from whichever
+ *   model actually worked — never a failed attempt, never two models'
+ *   output mixed.
  * - `done` — resolves to final usage once the stream completes. Only
  *   meaningful once `started` has already resolved ok.
+ *
+ * Timeout architecture (FOUR independent timers):
+ *   1. connect     — TCP+TLS handshake budget before first byte. Fires only
+ *                    before any output has arrived. Default 10s.
+ *   2. firstToken  — Time from request start to first valid output chunk.
+ *                    Fires only before the first chunk. Default 120s.
+ *   3. idle        — Gap between any two valid chunks; resets on every
+ *                    chunk. Default 120s.
+ *   4. total       — Never resets. Hard backstop. Default 600s.
+ * The first two are arm-then-disarm semantics: the moment any valid
+ * chunk arrives, both are cleared and never re-armed. The idle timer
+ * replaces them. The total timer is armed once and never disarmed.
+ *
+ * All four timers funnel into the same AbortController via a shared
+ * `racePromise`, so the streaming loop can race the iterator against
+ * whichever timer fires first. The exact reason is preserved on the
+ * UpstreamTimeoutError's `rejectReason` so the gateway's classifier
+ * can break down failures in the ledger.
  */
 export function callStreaming(
   target: RouteTarget,
@@ -562,14 +628,20 @@ export function callStreaming(
   tools?: any[],
   toolChoice?: any,
 ): { response: Response; started: Promise<StreamStartResult>; done: Promise<CallResult> } {
-  const { system, nonSystemMessages } = normalizeMessages(messages)
+  const adapted = adaptRequestForCapabilities(
+    messages, tools, toolChoice,
+    target.supportsTools, target.supportsVision,
+  )
+  const { system, nonSystemMessages } = normalizeMessages(adapted.messages as any)
+  const connectMs = env.UPSTREAM_CONNECT_TIMEOUT_MS
+  const firstTokenMs = env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS
   const idleMs = env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
   const maxMs = env.UPSTREAM_MAX_STREAM_DURATION_MS
 
-  // One AbortController for this entire streaming call. Both the idle timer
-  // and the max-duration backstop abort the same controller — whichever fires
-  // first wins. abortCause is set by whichever timer fires first so the catch
-  // block can identify the reason without reading signal.reason.
+  // One AbortController for this entire streaming call. Every timer below
+  // funnels into the same controller via the shared racePromise. The
+  // controller also gets called by the ReadableStream's `cancel` (client
+  // disconnect), so all exit paths share one cleanup path.
   //
   // The no-op "abort" listener is intentional: Bun emits an unhandled global
   // AbortError to stderr when abort() fires on a signal that has NO "abort"
@@ -585,8 +657,8 @@ export function callStreaming(
     messages: nonSystemMessages,
     maxOutputTokens,
     temperature,
-    tools: mapTools(tools),
-    toolChoice: mapToolChoice(toolChoice),
+    tools: mapTools(adapted.tools),
+    toolChoice: mapToolChoice(adapted.toolChoice),
     maxRetries: 0, // same reasoning as callNonStreaming — fail fast, let the gateway's cross-model fallback take over
     abortSignal: abortController.signal,
   })
@@ -671,19 +743,35 @@ export function callStreaming(
   let gotToolCalls = false  // track if any tool-call chunks were sent
   const created = Math.floor(Date.now() / 1000)
   const id = `chatcmpl-${Date.now()}`
+  const requestStartedAt = Date.now()
 
-  const stream = new ReadableStream({
+const stream = new ReadableStream({
     async start(controller) {
-      // -- Idle timer: resets on every content chunk. Fires if the provider
-      // goes silent for UPSTREAM_IDLE_TIMEOUT_MS_STREAMING ms. Armed
-      // immediately so TTFB stalls are also caught; reset on every content
-      // chunk so a slow-but-healthy stream is never killed just for running
-      // long — only for going silent.
-      //
       let abortCause: UpstreamTimeoutError | undefined
-      let idleTimer: ReturnType<typeof setTimeout> | null = null
       let rejectRace!: (err: unknown) => void
       const racePromise = new Promise<never>((_, rej) => { rejectRace = rej })
+
+      // Each timer is held in a variable so the finally block can clear it
+      // deterministically. Using `let` and null-init makes the cleanup
+      // idempotent even if start() throws before arming.
+      let connectTimer: ReturnType<typeof setTimeout> | null = null
+      let firstTokenTimer: ReturnType<typeof setTimeout> | null = null
+      let idleTimer: ReturnType<typeof setTimeout> | null = null
+      const maxTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
+        abortCause = new UpstreamTimeoutError(maxMs, undefined, "timeout:max_duration")
+        rejectRace(abortCause)
+      }, maxMs)
+
+      // Arm the pre-first-byte timers. Both are cleared on the first valid
+      // chunk and never re-armed.
+      connectTimer = setTimeout(() => {
+        abortCause = new UpstreamTimeoutError(connectMs, undefined, "timeout:connect")
+        rejectRace(abortCause)
+      }, connectMs)
+      firstTokenTimer = setTimeout(() => {
+        abortCause = new UpstreamTimeoutError(firstTokenMs, undefined, "timeout:first_token")
+        rejectRace(abortCause)
+      }, firstTokenMs)
 
       const armIdleTimer = () => {
         if (idleTimer !== null) clearTimeout(idleTimer)
@@ -693,12 +781,16 @@ export function callStreaming(
         }, idleMs)
       }
 
-      const maxTimer = setTimeout(() => {
-        abortCause = new UpstreamTimeoutError(maxMs, undefined, "timeout:max_duration")
-        rejectRace(abortCause)
-      }, maxMs)
+      const clearPreFirstByteTimers = () => {
+        if (connectTimer !== null) { clearTimeout(connectTimer); connectTimer = null }
+        if (firstTokenTimer !== null) { clearTimeout(firstTokenTimer); firstTokenTimer = null }
+      }
 
-      armIdleTimer()
+      const clearAllTimers = () => {
+        clearPreFirstByteTimers()
+        if (idleTimer !== null) { clearTimeout(idleTimer); idleTimer = null }
+        clearTimeout(maxTimer)
+      }
 
       const iterator = result.fullStream[Symbol.asyncIterator]()
       try {
@@ -708,8 +800,36 @@ export function callStreaming(
             racePromise
           ])
           if (isDone) break
-          
-          armIdleTimer()
+
+          // First valid chunk? Switch timer regime: clear the pre-first-byte
+          // timers, arm the idle timer. The first-token timer firing after
+          // we already got a chunk is the most common false positive of the
+          // old 30s single-timer design — fix that here.
+          const isContentChunk =
+            chunk.type === 'text-delta' ||
+            chunk.type === 'reasoning-delta' ||
+            chunk.type === 'tool-call' ||
+            chunk.type === 'tool-result'
+          if (isContentChunk) {
+            // First content chunk: kill the pre-first-byte budgets
+            // (connect + firstToken). Arm (or reset) the idle timer.
+            clearPreFirstByteTimers()
+            if (idleTimer === null) armIdleTimer()
+            else armIdleTimer() // reset
+          } else {
+            // Non-content chunks (start, start-step, finish-step,
+            // metadata, abort-ack, etc.) — DON'T clear the pre-first-byte
+            // timers here. The SDK synthesizes a `start` chunk BEFORE the
+            // upstream fetch has completed: clearing the connect timer
+            // would mask a hung upstream as if we'd already heard from
+            // the provider. The firstToken timer is the authoritative
+            // pre-first-byte budget and it stays armed. We do arm the
+            // idle timer on this first contact so a stream that goes
+            // silent after metadata but before content still aborts
+            // within idleTimeoutMs instead of hanging forever.
+            if (idleTimer === null) armIdleTimer()
+            else armIdleTimer() // reset
+          }
 
           if (chunk.type === 'text-delta') {
             if (!gotAnyContent) {
@@ -782,7 +902,7 @@ export function callStreaming(
           //   1. SDK rejection (carries APICallError with statusCode —
           //      the upstream's real status from a JSON error body
           //      disguised as an SSE stream)
-          //   2. abortCause (our idle/max-duration timeout fired)
+          //   2. abortCause (one of our four timers fired)
           //   3. NoOutputError (stream completed cleanly, produced nothing)
           // Without #1, every Cloudflare-edge 429/503 would be mis-tagged
           // as no_output in the ledger and the classifier would never see
@@ -823,8 +943,7 @@ export function callStreaming(
         controller.error(finalErr)
         rejectDone(finalErr)
       } finally {
-        if (idleTimer !== null) clearTimeout(idleTimer)
-        clearTimeout(maxTimer)
+        clearAllTimers()
         iterator.return?.()
       }
     },
@@ -832,8 +951,8 @@ export function callStreaming(
       // Abort the upstream request immediately so the provider stops
       // streaming AND we don't keep its slot occupied (and burn tokens)
       // for a client that has already disconnected. Without this, the
-      // underlying fetch would only be torn down when idleTimer or
-      // maxTimer eventually fires (up to 5 minutes later). The local
+      // underlying fetch would only be torn down when the maxTimer
+      // eventually fires (up to 10 minutes later by default). The local
       // settleStarted/rejectDone calls settle the consumer-facing
       // promises; abortController propagates the cancel to the SDK's
       // in-flight request via the signal we passed to streamText.
@@ -842,6 +961,11 @@ export function callStreaming(
       rejectDone(new Error("stream cancelled by client"))
     },
   })
+
+  // Surface the request start time via a tag on the response so gateway.ts
+  // can compute accurate per-attempt elapsed time without an extra clock
+  // read. Useful for the per-attempt log line in gateway.ts.
+  ;(stream as any)._zenStartedAt = requestStartedAt
 
   return {
     response: new Response(stream, { headers: { "content-type": "text/event-stream" } }),
