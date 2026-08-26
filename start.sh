@@ -55,6 +55,9 @@ ADMIN_PASSWORD=admin123456
 
 # Default monthly token budget
 DEFAULT_FREE_TOKEN_BUDGET=50000
+
+# Public URL
+APP_URL=http://192.168.253.155:8787
 EOF
     cp .env.production .env
     echo -e "${GREEN}✓ Created default .env.production and .env files.${NC}"
@@ -111,9 +114,9 @@ if [ "$READY" = "true" ]; then
     echo -e "${GREEN}=====================================================${NC}"
     echo -e "${GREEN}   🎉 Zen Gateway is UP and READY!                 ${NC}"
     echo -e "${GREEN}=====================================================${NC}"
-    echo -e "  • Admin Dashboard: ${CYAN}http://<YOUR_VM_IP>:8787/admin2${NC}"
-    echo -e "  • OpenAI Endpoint: ${CYAN}http://<YOUR_VM_IP>:8787/v1/chat/completions${NC}"
-    echo -e "  • Health Endpoint: ${CYAN}http://<YOUR_VM_IP>:8787/readyz${NC}"
+    echo -e "  • Admin Dashboard: ${CYAN}http://192.168.253.155:8787/admin2${NC}"
+    echo -e "  • OpenAI Endpoint: ${CYAN}http://192.168.253.155:8787/v1/chat/completions${NC}"
+    echo -e "  • Health Endpoint: ${CYAN}http://192.168.253.155:8787/readyz${NC}"
     echo -e ""
     echo -e "  Useful Management Commands:"
     echo -e "    View Logs : ${CYAN}docker compose logs -f gateway${NC}"

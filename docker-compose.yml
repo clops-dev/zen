@@ -114,9 +114,8 @@ services:
         required: false
 
     ports:
-      # Bind to loopback only — a reverse proxy (nginx/Caddy/HAProxy) should
-      # be in front of this in production, not exposing port 8787 directly.
-      - "127.0.0.1:8787:8787"
+      # Expose port 8787 for incoming LAN / port-forwarded traffic.
+      - "8787:8787"
     networks:
       - zen-net
 

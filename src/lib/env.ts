@@ -54,7 +54,7 @@ export const envSchema = z.object({
   // every upstream request to OpenRouter. OpenRouter uses this for
   // attribution and to keep free-tier callers from being deprioritized.
   // Must be a URL — OpenRouter rejects malformed values.
-  APP_URL: z.string().url().default("http://localhost:8787"),
+  APP_URL: z.string().url().default("http://192.168.253.155:8787"),
 
   // Public web URL used by the device auth flow to build the browser-facing
   // verification_url returned to the CLI. Optional — device-auth.ts falls back
