@@ -44,7 +44,7 @@ export function isReady(): ReadyState {
 /** Probe the database with a short timeout. Returns true if Postgres is
  * answering; false otherwise. The error is swallowed (logged once) — the
  * caller decides what to do with the boolean. */
-async function probeDb(timeoutMs = 1500): Promise<{ ok: boolean; error?: string }> {
+async function probeDb(timeoutMs = 5000): Promise<{ ok: boolean; error?: string }> {
   try {
     await Promise.race([
       withDbResilience(() => sql`SELECT 1`),
