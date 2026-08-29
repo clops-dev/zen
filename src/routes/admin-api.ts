@@ -3,6 +3,8 @@ import { z } from "zod"
 import { sql, withDbResilience } from "../lib/db"
 import { requireAdmin } from "../middleware/session-auth"
 import { audit, actorEmailFor } from "../lib/audit"
+import { fetchOpenRouterModelMetadata } from "../lib/openrouter"
+
 
 export const adminApi = new Hono()
 adminApi.use("*", requireAdmin())
@@ -538,9 +540,7 @@ adminApi.get("/models", async (c) => {
     const hasEmbeddings = await requireColumn("models", "supports_embeddings")
 
     const rows = await sql`
-      SELECT m.id, m.model_id, m.label, m.input_price_per_1m, m.output_price_per_1m,
-             m.context_window, m.supports_tools, m.supports_vision, m.supports_json_mode,
-             m.enabled, m.created_at, p.name AS provider_name, p.id AS provider_id
+      SELECT m.*, p.name AS provider_name, p.id AS provider_id, p.base_url AS provider_base_url
         FROM models m JOIN providers p ON p.id = m.provider_id
        ORDER BY p.name, m.model_id
     `
@@ -558,19 +558,117 @@ adminApi.get("/models", async (c) => {
   }
 })
 
+adminApi.post("/models/openrouter-fetch", async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const providerId = body?.provider_id
+  const modelId = body?.model_id
+  if (!providerId || !modelId) {
+    return jsonError(c, 400, "invalid_payload", "provider_id and model_id are required")
+  }
+
+  const [provider] = await sql`SELECT base_url FROM providers WHERE id = ${providerId}`
+  if (!provider) {
+    return jsonError(c, 404, "provider_not_found", "Provider not found")
+  }
+
+  if (!provider.base_url.toLowerCase().includes("openrouter.ai")) {
+    return jsonError(c, 400, "not_openrouter_provider", "Provider base_url is not OpenRouter")
+  }
+
+  try {
+    const meta = await fetchOpenRouterModelMetadata(modelId)
+    return c.json({ ok: true, metadata: meta })
+  } catch (err: any) {
+    const statusCode = err?.statusCode === 404 ? 404 : 500
+    const code = err?.statusCode === 404 ? "openrouter_model_not_found" : "openrouter_fetch_failed"
+    return jsonError(c, statusCode, code, err instanceof Error ? err.message : String(err))
+  }
+})
+
+adminApi.post("/models/:id/refresh", async (c) => {
+  const session = c.var.session
+  const id = c.req.param("id")
+  try {
+    const [m] = await sql`
+      SELECT m.*, p.base_url
+        FROM models m
+        JOIN providers p ON p.id = m.provider_id
+       WHERE m.id = ${id}
+    `
+    if (!m) return jsonError(c, 404, "not_found", "Model not found")
+
+    if (!m.base_url.toLowerCase().includes("openrouter.ai")) {
+      return jsonError(c, 400, "not_openrouter_provider", "Model is not on an OpenRouter provider")
+    }
+
+    const meta = await fetchOpenRouterModelMetadata(m.openrouter_model_id || m.model_id)
+
+    await sql`
+      UPDATE models SET
+        label = ${meta.label},
+        input_price_per_1m = ${meta.input_price_per_1m},
+        output_price_per_1m = ${meta.output_price_per_1m},
+        input_cache_read_price_per_1m = ${meta.input_cache_read_price_per_1m},
+        input_cache_write_price_per_1m = ${meta.input_cache_write_price_per_1m},
+        request_price_flat = ${meta.request_price_flat},
+        context_window = ${meta.context_window},
+        supports_tools = ${meta.supports_tools},
+        supports_vision = ${meta.supports_vision},
+        supports_json_mode = ${meta.supports_json_mode},
+        supports_structured_outputs = ${meta.supports_structured_outputs},
+        supports_reasoning = ${meta.supports_reasoning},
+        input_modalities = ${meta.input_modalities},
+        output_modalities = ${meta.output_modalities},
+        is_moderated = ${meta.is_moderated},
+        max_completion_tokens = ${meta.max_completion_tokens},
+        expiration_date = ${meta.expiration_date},
+        openrouter_model_id = ${meta.openrouter_model_id},
+        metadata_synced_at = now()
+      WHERE id = ${id}
+    `
+
+    await audit({
+      actorId: session.userId,
+      actorEmail: await actorEmailFor(session.userId),
+      action: "model.update",
+      resource: "model",
+      resourceId: id,
+      ip: ip(c),
+      metadata: { action: "refresh_openrouter_metadata", model_id: m.model_id },
+    })
+
+    return c.json({ ok: true, metadata: meta })
+  } catch (err: any) {
+    const statusCode = err?.statusCode === 404 ? 404 : 500
+    const code = err?.statusCode === 404 ? "openrouter_model_not_found" : "openrouter_refresh_failed"
+    return jsonError(c, statusCode, code, err instanceof Error ? err.message : String(err))
+  }
+})
+
 const modelCreateSchema = z.object({
   provider_id: z.string().uuid(),
   model_id: z.string().min(1).max(256),
   label: z.string().optional().nullable(),
   input_price_per_1m: z.coerce.number().min(0).default(0),
   output_price_per_1m: z.coerce.number().min(0).default(0),
+  input_cache_read_price_per_1m: z.coerce.number().min(0).optional().nullable(),
+  input_cache_write_price_per_1m: z.coerce.number().min(0).optional().nullable(),
+  request_price_flat: z.coerce.number().min(0).optional().default(0),
   context_window: z.coerce.number().int().positive().optional().nullable(),
   supports_tools: z.boolean().default(false),
   supports_vision: z.boolean().default(false),
   supports_json_mode: z.boolean().default(false),
   supports_streaming: z.boolean().default(true),
   supports_reasoning: z.boolean().default(false),
+  supports_structured_outputs: z.boolean().default(false),
   supports_embeddings: z.boolean().default(false),
+  input_modalities: z.array(z.string()).optional().default([]),
+  output_modalities: z.array(z.string()).optional().default([]),
+  is_moderated: z.boolean().default(false),
+  max_completion_tokens: z.coerce.number().int().positive().optional().nullable(),
+  expiration_date: z.string().optional().nullable(),
+  openrouter_model_id: z.string().optional().nullable(),
+  metadata_synced_at: z.string().optional().nullable(),
   enabled: z.boolean().default(true),
 })
 
@@ -579,39 +677,63 @@ adminApi.post("/models", async (c) => {
   const body = await c.req.json().catch(() => null)
   const parsed = modelCreateSchema.safeParse(body)
   if (!parsed.success) return jsonError(c, 400, "invalid_payload", JSON.stringify(parsed.error.flatten()))
-  const d = parsed.data
-  try {
-    const hasStreaming = await requireColumn("models", "supports_streaming")
-    const hasReasoning = await requireColumn("models", "supports_reasoning")
-    const hasEmbeddings = await requireColumn("models", "supports_embeddings")
+  let d = parsed.data
 
-    if (hasStreaming && hasReasoning && hasEmbeddings) {
-      const [m] = await sql`
-        INSERT INTO models (provider_id, model_id, label, input_price_per_1m, output_price_per_1m,
-                            context_window, supports_tools, supports_vision, supports_json_mode,
-                            supports_streaming, supports_reasoning, supports_embeddings, enabled)
-        VALUES (${d.provider_id}, ${d.model_id}, ${d.label ?? null}, ${d.input_price_per_1m}, ${d.output_price_per_1m},
-                ${d.context_window ?? null}, ${d.supports_tools}, ${d.supports_vision}, ${d.supports_json_mode},
-                ${d.supports_streaming}, ${d.supports_reasoning}, ${d.supports_embeddings}, ${d.enabled})
-        RETURNING id
-      `
-      await audit({
-        actorId: session.userId,
-        actorEmail: await actorEmailFor(session.userId),
-        action: "model.create",
-        resource: "model",
-        resourceId: m.id,
-        ip: ip(c),
-        metadata: { model_id: d.model_id, provider_id: d.provider_id },
-      })
-      return c.json({ id: m.id })
+  try {
+    const [provider] = await sql`SELECT base_url FROM providers WHERE id = ${d.provider_id}`
+    const isOpenRouter = provider?.base_url?.toLowerCase().includes("openrouter.ai")
+
+    // If registered on OpenRouter and metadata was not pre-fetched, perform server-side auto-fetch
+    if (isOpenRouter && !d.metadata_synced_at && body?.auto_fetch !== false) {
+      try {
+        const fetched = await fetchOpenRouterModelMetadata(d.model_id)
+        d = {
+          ...d,
+          label: d.label || fetched.label,
+          input_price_per_1m: d.input_price_per_1m !== 0 ? d.input_price_per_1m : fetched.input_price_per_1m,
+          output_price_per_1m: d.output_price_per_1m !== 0 ? d.output_price_per_1m : fetched.output_price_per_1m,
+          input_cache_read_price_per_1m: d.input_cache_read_price_per_1m ?? fetched.input_cache_read_price_per_1m,
+          input_cache_write_price_per_1m: d.input_cache_write_price_per_1m ?? fetched.input_cache_write_price_per_1m,
+          request_price_flat: d.request_price_flat ?? fetched.request_price_flat,
+          context_window: d.context_window ?? fetched.context_window,
+          supports_tools: d.supports_tools || fetched.supports_tools,
+          supports_vision: d.supports_vision || fetched.supports_vision,
+          supports_json_mode: d.supports_json_mode || fetched.supports_json_mode,
+          supports_structured_outputs: d.supports_structured_outputs || fetched.supports_structured_outputs,
+          supports_reasoning: d.supports_reasoning || fetched.supports_reasoning,
+          input_modalities: d.input_modalities?.length ? d.input_modalities : fetched.input_modalities,
+          output_modalities: d.output_modalities?.length ? d.output_modalities : fetched.output_modalities,
+          is_moderated: d.is_moderated || fetched.is_moderated,
+          max_completion_tokens: d.max_completion_tokens ?? fetched.max_completion_tokens,
+          expiration_date: d.expiration_date ?? fetched.expiration_date,
+          openrouter_model_id: d.openrouter_model_id || fetched.openrouter_model_id,
+          metadata_synced_at: fetched.metadata_synced_at,
+        }
+      } catch (fetchErr: any) {
+        const statusCode = fetchErr?.statusCode === 404 ? 404 : 400
+        const errCode = fetchErr?.statusCode === 404 ? "openrouter_model_not_found" : "openrouter_fetch_failed"
+        return jsonError(c, statusCode, errCode, fetchErr instanceof Error ? fetchErr.message : String(fetchErr))
+      }
     }
 
     const [m] = await sql`
-      INSERT INTO models (provider_id, model_id, label, input_price_per_1m, output_price_per_1m,
-                          context_window, supports_tools, supports_vision, supports_json_mode, enabled)
-      VALUES (${d.provider_id}, ${d.model_id}, ${d.label ?? null}, ${d.input_price_per_1m}, ${d.output_price_per_1m},
-              ${d.context_window ?? null}, ${d.supports_tools}, ${d.supports_vision}, ${d.supports_json_mode}, ${d.enabled})
+      INSERT INTO models (
+        provider_id, model_id, label, input_price_per_1m, output_price_per_1m,
+        input_cache_read_price_per_1m, input_cache_write_price_per_1m, request_price_flat,
+        context_window, supports_tools, supports_vision, supports_json_mode,
+        supports_structured_outputs, supports_reasoning,
+        input_modalities, output_modalities, is_moderated,
+        max_completion_tokens, expiration_date, openrouter_model_id, metadata_synced_at, enabled
+      )
+      VALUES (
+        ${d.provider_id}, ${d.model_id}, ${d.label ?? null}, ${d.input_price_per_1m}, ${d.output_price_per_1m},
+        ${d.input_cache_read_price_per_1m ?? null}, ${d.input_cache_write_price_per_1m ?? null}, ${d.request_price_flat ?? 0},
+        ${d.context_window ?? null}, ${d.supports_tools}, ${d.supports_vision}, ${d.supports_json_mode},
+        ${d.supports_structured_outputs}, ${d.supports_reasoning},
+        ${d.input_modalities}, ${d.output_modalities}, ${d.is_moderated},
+        ${d.max_completion_tokens ?? null}, ${d.expiration_date ?? null}, ${d.openrouter_model_id ?? null},
+        ${d.metadata_synced_at ? new Date(d.metadata_synced_at) : null}, ${d.enabled}
+      )
       RETURNING id
     `
     await audit({
@@ -647,13 +769,24 @@ adminApi.patch("/models/:id", async (c) => {
       label: "label",
       input_price_per_1m: "input_price_per_1m",
       output_price_per_1m: "output_price_per_1m",
+      input_cache_read_price_per_1m: "input_cache_read_price_per_1m",
+      input_cache_write_price_per_1m: "input_cache_write_price_per_1m",
+      request_price_flat: "request_price_flat",
       context_window: "context_window",
       supports_tools: "supports_tools",
       supports_vision: "supports_vision",
       supports_json_mode: "supports_json_mode",
+      supports_structured_outputs: "supports_structured_outputs",
       supports_streaming: "supports_streaming",
       supports_reasoning: "supports_reasoning",
       supports_embeddings: "supports_embeddings",
+      input_modalities: "input_modalities",
+      output_modalities: "output_modalities",
+      is_moderated: "is_moderated",
+      max_completion_tokens: "max_completion_tokens",
+      expiration_date: "expiration_date",
+      openrouter_model_id: "openrouter_model_id",
+      metadata_synced_at: "metadata_synced_at",
       enabled: "enabled",
     }
     const sets: string[] = []
@@ -678,6 +811,7 @@ adminApi.patch("/models/:id", async (c) => {
       metadata: { fields: Object.keys(d) },
     })
     return c.json({ ok: true })
+
   } catch (err) {
     return jsonError(c, 500, "model_update_failed", err instanceof Error ? err.message : String(err))
   }

@@ -247,10 +247,29 @@ function installShutdown(server: { stop: (closeActiveConnections?: boolean) => P
   process.on("SIGINT", () => onSignal("SIGINT"))
 }
 
-const server = Bun.serve({
-  port: env.PORT,
-  fetch: app.fetch,
-  idleTimeout: bunIdleTimeoutSeconds,
-})
+let appServer: any
+let currentPort = env.PORT
+for (let attempt = 0; attempt < 5; attempt++) {
+  try {
+    appServer = Bun.serve({
+      port: currentPort,
+      fetch: app.fetch,
+      idleTimeout: bunIdleTimeoutSeconds,
+    })
+    log.info(`zen-gateway listening on :${currentPort}`)
+    break
+  } catch (err: any) {
+    if (err?.code === "EADDRINUSE" || /in use/i.test(err?.message ?? "")) {
+      log.warn(`port ${currentPort} in use, retrying on :${currentPort + 1}`)
+      currentPort++
+    } else {
+      throw err
+    }
+  }
+}
 
-installShutdown(server)
+if (appServer) {
+  installShutdown(appServer)
+}
+
+

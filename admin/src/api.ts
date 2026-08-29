@@ -59,17 +59,29 @@ export type Model = {
   label: string | null
   input_price_per_1m: string | number
   output_price_per_1m: string | number
+  input_cache_read_price_per_1m?: string | number | null
+  input_cache_write_price_per_1m?: string | number | null
+  request_price_flat?: string | number | null
   context_window: number | null
   supports_tools: boolean
   supports_vision: boolean
   supports_json_mode: boolean
   supports_streaming: boolean
   supports_reasoning: boolean
+  supports_structured_outputs?: boolean
   supports_embeddings: boolean
+  input_modalities?: string[]
+  output_modalities?: string[]
+  is_moderated?: boolean
+  max_completion_tokens?: number | null
+  expiration_date?: string | null
+  openrouter_model_id?: string | null
+  metadata_synced_at?: string | null
   enabled: boolean
   created_at: string
   provider_name: string
   provider_id: string
+  provider_base_url?: string
 }
 
 export type Route = {
@@ -204,6 +216,14 @@ export const cloneModel = (id: string) => request<{ id: string }>(`/admin-api/mo
 export const toggleModel = (id: string) => request<{ ok: true; enabled: boolean }>(`/admin-api/models/${id}/toggle`, { method: "POST" })
 export const testModel = (id: string) => request<{ ok: boolean; status: number; latency_ms: number }>(`/admin-api/models/${id}/test`, { method: "POST" })
 export const deleteModel = (id: string) => request<{ ok: true }>(`/admin-api/models/${id}`, { method: "DELETE" })
+export const fetchOpenRouterMetadata = (providerId: string, modelId: string) =>
+  request<{ ok: true; metadata: any }>("/admin-api/models/openrouter-fetch", {
+    method: "POST",
+    body: JSON.stringify({ provider_id: providerId, model_id: modelId }),
+  })
+export const refreshModelMetadata = (id: string) =>
+  request<{ ok: true; metadata: any }>(`/admin-api/models/${id}/refresh`, { method: "POST" })
+
 
 export const listRoutes = () => request<{ routes: Route[] }>("/admin-api/routing")
 export const createRoute = (body: any) => request<{ id: string }>("/admin-api/routing", { method: "POST", body: JSON.stringify(body) })

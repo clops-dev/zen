@@ -341,7 +341,16 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
         try {
           const result = await callNonStreaming(target, messages as any, maxOutputTokens, temperature, tools, tool_choice)
           const latencyMs = Date.now() - started
-          const cost = calcCost(target.inputPricePer1M, target.outputPricePer1M, result.inputTokens, result.outputTokens)
+          const cost = calcCost({
+            inputPricePer1M: target.inputPricePer1M,
+            outputPricePer1M: target.outputPricePer1M,
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+            inputCacheReadPricePer1M: target.inputCacheReadPricePer1M,
+            inputCacheWritePricePer1M: target.inputCacheWritePricePer1M,
+            requestPriceFlat: target.requestPriceFlat,
+            cachedTokens: (result as any).cachedTokens ?? 0,
+          })
 
           bg(reportRouteOutcome(target.providerId, true))
           bg(recordUsage(user.id, result.inputTokens, result.outputTokens, cost))
@@ -421,9 +430,10 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
         }, 413)
       }
       if (err instanceof UnsupportedCapabilityError) {
-        bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `unsupported_capability: ${err.missingCapabilities.join(",")}` }))
+        const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
+        bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}` }))
         return c.json({
-          error: "unsupported_capability",
+          error: errCode,
           message: err.message,
           missing_capabilities: err.missingCapabilities,
           tier: err.tier,
@@ -524,7 +534,16 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
         try {
           const result = await done
           const latencyMs = Date.now() - started
-          const cost = calcCost(target.inputPricePer1M, target.outputPricePer1M, result.inputTokens, result.outputTokens)
+          const cost = calcCost({
+            inputPricePer1M: target.inputPricePer1M,
+            outputPricePer1M: target.outputPricePer1M,
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+            inputCacheReadPricePer1M: target.inputCacheReadPricePer1M,
+            inputCacheWritePricePer1M: target.inputCacheWritePricePer1M,
+            requestPriceFlat: target.requestPriceFlat,
+            cachedTokens: (result as any).cachedTokens ?? 0,
+          })
           await reportRouteOutcome(target.providerId, true)
           await recordUsage(user.id, result.inputTokens, result.outputTokens, cost)
           await recordRequest({
@@ -572,9 +591,10 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       })
     }
     if (err instanceof UnsupportedCapabilityError) {
-      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `unsupported_capability: ${err.missingCapabilities.join(",")}` }))
+      const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
+      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}` }))
       const body = `data: ${JSON.stringify({
-        error: "unsupported_capability",
+        error: errCode,
         message: err.message,
         missing_capabilities: err.missingCapabilities,
         tier: err.tier,

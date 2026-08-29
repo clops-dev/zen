@@ -7,10 +7,7 @@ const FAILURE_THRESHOLD = 3
 
 /** Raised by pickRoute when the request's input tokens exceed the largest
  * context window available in the configured fallback chain for this
- * request's tier. The gateway catches this in its try/catch fallback loop
- * and surfaces a 413-ish response — never a raw provider 400. The exact
- * required/available token numbers are attached so the client can decide
- * what to do (truncate, summarize, split into sub-tasks, etc.). */
+ * request's tier. */
 export class ContextWindowExceededError extends Error {
   readonly requiredTokens: number
   readonly largestAvailable: number
@@ -48,18 +45,13 @@ export interface RouteTarget {
   label: string // "provider_name/model_id", used in logs and the ai_requests ledger
   inputPricePer1M: number
   outputPricePer1M: number
-  /** Provider's advertised context window in tokens. null = unknown (we
-   * skip the context check for that model). */
+  inputCacheReadPricePer1M?: number | null
+  inputCacheWritePricePer1M?: number | null
+  requestPriceFlat?: number | null
   contextWindow: number | null
   supportsTools: boolean
   supportsVision: boolean
   supportsJsonMode: boolean
-  /** Which upstream adapter to use. "openai-compatible" routes through
-   * @ai-sdk/openai-compatible (chat completions, /v1/chat/completions).
-   * "anthropic-compatible" routes through @ai-sdk/anthropic (messages,
-   * /messages, Bearer auth, anthropic-version header). Selected at the
-   * provider row level (providers.provider_type) and surfaced here so
-   * ai-call.ts can dispatch without re-querying the DB. */
   providerType: "openai-compatible" | "anthropic-compatible"
 }
 
@@ -72,6 +64,9 @@ interface Candidate {
   model_id: string
   input_price_per_1m: string
   output_price_per_1m: string
+  input_cache_read_price_per_1m: string | null
+  input_cache_write_price_per_1m: string | null
+  request_price_flat: string | null
   context_window: number | null
   supports_tools: boolean
   supports_vision: boolean
@@ -80,9 +75,6 @@ interface Candidate {
   provider_type: "openai-compatible" | "anthropic-compatible"
 }
 
-/** Deterministic weighted pick for tests; non-deterministic in prod unless
- * DETERMINISTIC_ROUTING=1 is set. Extracted so unit tests can assert which
- * candidate is chosen from a fixed list. */
 function weightedPick<T extends { weight: number }>(items: T[]): T | null {
   if (items.length === 0) return null
   const total = items.reduce((s, i) => s + i.weight, 0)
@@ -102,7 +94,9 @@ async function getTierCandidates(tier: ComplexityTier): Promise<Candidate[]> {
     SELECT
       m.id AS model_row_id, p.id AS provider_id, p.name AS provider_name,
       p.base_url, p.api_key, m.model_id,
-      m.input_price_per_1m, m.output_price_per_1m, m.context_window,
+      m.input_price_per_1m, m.output_price_per_1m,
+      m.input_cache_read_price_per_1m, m.input_cache_write_price_per_1m, m.request_price_flat,
+      m.context_window,
       m.supports_tools, m.supports_vision, m.supports_json_mode,
       p.provider_type,
       tr.weight::float8 AS weight,
@@ -117,16 +111,15 @@ async function getTierCandidates(tier: ComplexityTier): Promise<Candidate[]> {
   )
 }
 
-/** Last-resort: any enabled, healthy model on any enabled provider, regardless
- * of tier_routes. Makes the gateway work the moment you've added one
- * provider + one model, before you've configured per-tier routing. */
 async function getAnyCandidate(): Promise<Candidate[]> {
   const now = Date.now()
   const rows = await withDbResilience(() => sql<Candidate[]>`
     SELECT
       m.id AS model_row_id, p.id AS provider_id, p.name AS provider_name,
       p.base_url, p.api_key, m.model_id,
-      m.input_price_per_1m, m.output_price_per_1m, m.context_window,
+      m.input_price_per_1m, m.output_price_per_1m,
+      m.input_cache_read_price_per_1m, m.input_cache_write_price_per_1m, m.request_price_flat,
+      m.context_window,
       m.supports_tools, m.supports_vision, m.supports_json_mode,
       p.provider_type,
       1::float8 AS weight,
@@ -151,6 +144,9 @@ function toTarget(c: Candidate): RouteTarget {
     label: `${c.provider_name}/${c.model_id}`,
     inputPricePer1M: Number(c.input_price_per_1m),
     outputPricePer1M: Number(c.output_price_per_1m),
+    inputCacheReadPricePer1M: c.input_cache_read_price_per_1m != null ? Number(c.input_cache_read_price_per_1m) : null,
+    inputCacheWritePricePer1M: c.input_cache_write_price_per_1m != null ? Number(c.input_cache_write_price_per_1m) : null,
+    requestPriceFlat: c.request_price_flat != null ? Number(c.request_price_flat) : 0,
     contextWindow: c.context_window,
     supportsTools: c.supports_tools,
     supportsVision: c.supports_vision,
@@ -159,19 +155,10 @@ function toTarget(c: Candidate): RouteTarget {
   }
 }
 
-/** Default reserve needed to leave room for a model's response on top
- * of input. The larger of: 20% of the context window, or 2048 tokens
- * (some tool-call schemas and short answers legitimately need that much
- * output headroom). Exported so tests can verify the math. */
 export function defaultReserveFor(contextWindow: number): number {
   return Math.max(2048, Math.floor(contextWindow * 0.2))
 }
 
-/** Pure helper: does this candidate leave enough room for `requiredTokens`
- * plus a reserve for output? `context_window: null` means unknown — we
- * skip the check (don't block on missing data). Tracks the largest
- * context window seen in `largestSink.value` for the caller's error
- * reporting. Exported for direct unit testing without a DB. */
 export function candidateFitsContext(
   candidate: Pick<Candidate, "context_window">,
   requiredTokens: number | undefined,
@@ -193,28 +180,6 @@ export interface RouteRequirements {
   requiresJsonMode?: boolean
 }
 
-/**
- * Picks a target for the given complexity tier, escalating upward through
- * tiers if nothing is healthy there, then falling back to ANY enabled model
- * anywhere if tier_routes has nothing configured at all.
- *
- * `excludeModelRowIds` — model rows already tried and failed in THIS
- * request (not persisted, just for one fallback loop in gateway.ts). This
- * is what turns "multiple models on one tier" into real per-request
- * fallback: exclude the one that just failed, pick again.
- *
- * `requiredTokens` — caller-computed upper bound on input tokens for this
- * request. Candidates whose context window (minus reserve for output)
- * cannot fit `requiredTokens` are filtered out. If no candidate in the
- * entire fallback chain (start tier through `maxTier`, then the catch-all
- * "any model" set) has a sufficient context window, throws
- * ContextWindowExceededError rather than silently picking a too-small
- * model. Pass `undefined` to skip the check (legacy callers; not used by
- * the gateway).
- *
- * Returns null only if there is truly no usable, untried provider/model
- * configured anywhere AND no context-window check was requested.
- */
 export async function pickRoute(
   startTier: ComplexityTier,
   maxTier: ComplexityTier = "complex",
@@ -224,27 +189,23 @@ export async function pickRoute(
   const startIdx = TIER_ORDER.indexOf(startTier)
   const maxIdx = Math.min(TIER_ORDER.indexOf(maxTier), TIER_ORDER.length - 1)
 
-  // Tracks the largest context window seen across the entire fallback
-  // chain, used for the error message when nothing fits. Includes the
-  // catch-all "any model" set so the error reflects the true maximum.
   const largestSink: { value: number | null } = { value: null }
   const missingCaps = new Set<string>()
   let anyCapable = false
-  
+
   const fits = (c: Candidate, isExcluded: boolean): boolean => {
     let fitsCapabilities = true
     if (requirements.requiresTools && !c.supports_tools) { missingCaps.add('tools'); fitsCapabilities = false }
     if (requirements.requiresVision && !c.supports_vision) { missingCaps.add('vision'); fitsCapabilities = false }
     if (requirements.requiresJsonMode && !c.supports_json_mode) { missingCaps.add('json_mode'); fitsCapabilities = false }
-    
+
     if (fitsCapabilities) {
       anyCapable = true
     }
-    
+
     if (!fitsCapabilities) return false
-    
     if (isExcluded) return false
-    
+
     return candidateFitsContext(c, requirements.requiredTokens, largestSink)
   }
 
@@ -256,7 +217,7 @@ export async function pickRoute(
       console.error("[routing] tier_routes query failed:", err)
       candidates = []
     }
-    
+
     const validCandidates: Candidate[] = []
     for (const c of candidates) {
       const isExcluded = excludeModelRowIds.has(c.model_row_id)
@@ -273,8 +234,6 @@ export async function pickRoute(
     }
   }
 
-  // Nothing configured for any tier — fall back to anything at all, still
-  // respecting exclusions so this doesn't just re-return the same failed model.
   try {
     let any = await getAnyCandidate()
     const validAny: Candidate[] = []
@@ -290,18 +249,13 @@ export async function pickRoute(
     console.error("[routing] fallback query failed:", err)
   }
 
-  // If the caller asked for a context check and the chain had at least one
-  // candidate but none fit, raise the typed error. (If largestSink.value
-  // is null it means we found NO models at all — keep the existing null
-  // return so the gateway can produce its "no providers configured" 503.)
+  if (requirements.requiresTools && missingCaps.has('tools') && !anyCapable) {
+    throw new UnsupportedCapabilityError(['tools'], startTier)
+  }
+
   if (requirements.requiredTokens !== undefined && largestSink.value !== null) {
     throw new ContextWindowExceededError(requirements.requiredTokens, largestSink.value, startTier)
   }
-  
-  if (!anyCapable && missingCaps.size > 0 && largestSink.value === null) {
-    throw new UnsupportedCapabilityError(Array.from(missingCaps), startTier)
-  }
-  
   return null
 }
 
