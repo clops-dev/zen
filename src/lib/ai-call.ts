@@ -10,11 +10,62 @@ export interface CallResult {
   toolCalls?: any[]
   inputTokens: number
   outputTokens: number
+  finishReason?: string
 }
 
 export interface StreamStartResult {
   ok: boolean
   error?: unknown
+}
+
+const ANTHROPIC_CACHE_CONTROL = { type: "ephemeral" as const }
+
+/** Map AI SDK finish reasons to OpenAI wire-format finish_reason values. */
+function toOpenAIFinishReason(sdkFinishReason: string | undefined, hasToolCalls: boolean): string {
+  if (sdkFinishReason === "length") return "length"
+  if (hasToolCalls || sdkFinishReason === "tool-calls") return "tool_calls"
+  return "stop"
+}
+
+/** Add Anthropic prompt-caching breakpoints so repeated turns with a growing
+ * prefix aren't billed at full price for unchanged content. Only applied for
+ * anthropic-compatible providers — others ignore providerOptions silently. */
+function applyPromptCaching(
+  target: RouteTarget,
+  system: string | undefined,
+  messages: ModelMessage[],
+): { system: string | { role: "system"; content: string; providerOptions: { anthropic: { cacheControl: typeof ANTHROPIC_CACHE_CONTROL } } } | undefined; messages: ModelMessage[] } {
+  if (target.providerType !== "anthropic-compatible") {
+    return { system, messages }
+  }
+
+  const cacheOpts = { anthropic: { cacheControl: ANTHROPIC_CACHE_CONTROL } }
+  const cachedSystem = system
+    ? { role: "system" as const, content: system, providerOptions: cacheOpts }
+    : undefined
+
+  if (messages.length === 0) {
+    return { system: cachedSystem, messages }
+  }
+
+  // Breakpoint on the penultimate message (stable prefix before the latest turn).
+  const breakpointIdx = messages.length >= 2 ? messages.length - 2 : messages.length - 1
+  const cachedMessages = messages.map((m, i) => {
+    if (i !== breakpointIdx) return m
+    const existing = (m as { providerOptions?: Record<string, unknown> }).providerOptions ?? {}
+    return {
+      ...m,
+      providerOptions: {
+        ...existing,
+        anthropic: {
+          ...((existing.anthropic as Record<string, unknown> | undefined) ?? {}),
+          cacheControl: ANTHROPIC_CACHE_CONTROL,
+        },
+      },
+    } as ModelMessage
+  })
+
+  return { system: cachedSystem, messages: cachedMessages }
 }
 
 function mapTools(tools?: any[]): Record<string, any> | undefined {
@@ -554,14 +605,15 @@ export async function callNonStreaming(
     target.supportsTools, target.supportsVision,
   )
   const { system, nonSystemMessages } = normalizeMessages(adapted.messages as any)
+  const cached = applyPromptCaching(target, system, nonSystemMessages)
   const timeoutMs = env.UPSTREAM_TIMEOUT_MS_NON_STREAMING
   const signal = newTimeoutSignal(timeoutMs)
 
   try {
     const result = await generateText({
       model: toModel(target),
-      ...(system ? { system } : {}),
-      messages: nonSystemMessages,
+      ...(cached.system ? { system: cached.system } : {}),
+      messages: cached.messages,
       maxOutputTokens,
       temperature,
       tools: mapTools(adapted.tools),
@@ -578,6 +630,7 @@ export async function callNonStreaming(
       })),
       inputTokens: result.usage.inputTokens ?? 0,
       outputTokens: result.usage.outputTokens ?? 0,
+      finishReason: toOpenAIFinishReason(result.finishReason, !!(result.toolCalls?.length)),
     }
   } catch (err) {
     if (isTimeoutError(err)) throw new UpstreamTimeoutError(timeoutMs, err, "timeout:non_streaming")
@@ -633,6 +686,7 @@ export function callStreaming(
     target.supportsTools, target.supportsVision,
   )
   const { system, nonSystemMessages } = normalizeMessages(adapted.messages as any)
+  const cached = applyPromptCaching(target, system, nonSystemMessages)
   const connectMs = env.UPSTREAM_CONNECT_TIMEOUT_MS
   const firstTokenMs = env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS
   const idleMs = env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
@@ -653,8 +707,8 @@ export function callStreaming(
 
   const result = streamText({
     model: toModel(target),
-    ...(system ? { system } : {}),
-    messages: nonSystemMessages,
+    ...(cached.system ? { system: cached.system } : {}),
+    messages: cached.messages,
     maxOutputTokens,
     temperature,
     tools: mapTools(adapted.tools),
@@ -744,6 +798,13 @@ export function callStreaming(
   const created = Math.floor(Date.now() / 1000)
   const id = `chatcmpl-${Date.now()}`
   const requestStartedAt = Date.now()
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  const stopHeartbeat = () => {
+    if (heartbeatTimer !== null) {
+      clearInterval(heartbeatTimer)
+      heartbeatTimer = null
+    }
+  }
 
 const stream = new ReadableStream({
     async start(controller) {
@@ -790,7 +851,22 @@ const stream = new ReadableStream({
         clearPreFirstByteTimers()
         if (idleTimer !== null) { clearTimeout(idleTimer); idleTimer = null }
         clearTimeout(maxTimer)
+        stopHeartbeat()
       }
+
+      // SSE comment heartbeats keep Azure Container Apps ingress alive during
+      // slow connects / fallback retries (30 s idle timeout).
+      heartbeatTimer = setInterval(() => {
+        if (gotAnyContent) {
+          stopHeartbeat()
+          return
+        }
+        try {
+          controller.enqueue(encoder.encode(": heartbeat\n\n"))
+        } catch {
+          stopHeartbeat()
+        }
+      }, 17_000)
 
       const iterator = result.fullStream[Symbol.asyncIterator]()
       try {
@@ -834,6 +910,7 @@ const stream = new ReadableStream({
           if (chunk.type === 'text-delta') {
             if (!gotAnyContent) {
               gotAnyContent = true
+              stopHeartbeat()
               settleStarted({ ok: true })
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
                 id, object: "chat.completion.chunk", created, model: modelLabel,
@@ -849,6 +926,7 @@ const stream = new ReadableStream({
           } else if (chunk.type === 'reasoning-delta') {
             if (!gotAnyContent) {
               gotAnyContent = true
+              stopHeartbeat()
               settleStarted({ ok: true })
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
                 id, object: "chat.completion.chunk", created, model: modelLabel,
@@ -863,6 +941,7 @@ const stream = new ReadableStream({
           } else if (chunk.type === 'tool-call') {
             if (!gotAnyContent) {
               gotAnyContent = true
+              stopHeartbeat()
               settleStarted({ ok: true })
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
                 id, object: "chat.completion.chunk", created, model: modelLabel,
@@ -915,9 +994,11 @@ const stream = new ReadableStream({
         }
 
         const usage = await result.usage
+        const sdkFinishReason = await result.finishReason
+        const finishReason = toOpenAIFinishReason(sdkFinishReason, gotToolCalls)
         const finalChunk = {
           id, object: "chat.completion.chunk", created, model: modelLabel,
-          choices: [{ index: 0, delta: {}, finish_reason: gotToolCalls ? "tool_calls" : "stop" }],
+          choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
           usage: {
             prompt_tokens: usage.inputTokens ?? 0,
             completion_tokens: usage.outputTokens ?? 0,
@@ -948,6 +1029,7 @@ const stream = new ReadableStream({
       }
     },
     cancel() {
+      stopHeartbeat()
       // Abort the upstream request immediately so the provider stops
       // streaming AND we don't keep its slot occupied (and burn tokens)
       // for a client that has already disconnected. Without this, the

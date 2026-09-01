@@ -223,7 +223,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
     return c.json({ error: "invalid payload", details: parsed.error.flatten() }, 400)
   }
   const { messages, stream, max_tokens, temperature, tools, tool_choice } = parsed.data
-  const maxOutputTokens = max_tokens ?? 4096
+  const maxOutputTokens = max_tokens ?? 16384
 
   const quota = await checkQuota(user.id)
   if (!quota.allowed) {
@@ -370,7 +370,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             choices: [{
               index: 0,
               message: { role: "assistant", content: result.content, ...(result.toolCalls?.length ? { tool_calls: result.toolCalls } : {}) },
-              finish_reason: result.toolCalls?.length ? "tool_calls" : "stop",
+              finish_reason: result.finishReason ?? (result.toolCalls?.length ? "tool_calls" : "stop"),
             }],
             usage: { prompt_tokens: result.inputTokens, completion_tokens: result.outputTokens },
           })

@@ -169,6 +169,16 @@ try {
   console.error("[bootstrap] failed to seed AGENTROUTER_API_KEY:", formatError(err))
 }
 
+process.on("unhandledRejection", (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason))
+  log.fatal("FATAL: unhandled rejection", {}, err)
+})
+
+process.on("uncaughtException", (err) => {
+  log.fatal("FATAL: uncaught exception", {}, err)
+  process.exit(1)
+})
+
 console.log(`zen-gateway listening on :${env.PORT}`)
 
 // Bun's idleTimeout is in SECONDS (default: 10s). We must set it explicitly

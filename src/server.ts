@@ -14,6 +14,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const app = new Hono()
+const isProd = (process.env.NODE_ENV ?? "development") === "production"
 
 // Request-id is first so every other middleware and every log line can
 // stamp the same correlation id. Mount it before the routes (which don't
@@ -77,6 +78,15 @@ app.onError((err, c) => {
   log.error("unhandled_error", { request_id: c.get("requestId"), path: c.req.path }, err)
   const accept = c.req.header("Accept") ?? ""
   if (accept.includes("text/html")) {
+    if (isProd) {
+      return c.html(
+        `<!doctype html><body style="background:#0c0a09;color:#ff6467;font-family:monospace;padding:24px">
+         <h1>Internal Server Error</h1>
+         <p style="color:#fafaf9">Something went wrong. Please try again later.</p>
+         </body>`,
+        500,
+      )
+    }
     return c.html(
       `<!doctype html><body style="background:#0c0a09;color:#ff6467;font-family:monospace;padding:24px">
        <h1>Internal Server Error</h1>
@@ -84,6 +94,9 @@ app.onError((err, c) => {
        </body>`,
       500,
     )
+  }
+  if (isProd) {
+    return c.json({ error: "internal_server_error" }, 500)
   }
   return c.json({ error: "internal_server_error", message: err instanceof Error ? err.message : String(err) }, 500)
 })

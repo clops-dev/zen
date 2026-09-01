@@ -45,4 +45,5 @@ export const SESSION_COOKIE_OPTIONS = {
   sameSite: "Lax" as const,
   path: "/",
   maxAge: Math.floor(SESSION_TTL_MS / 1000),
+  ...(process.env.NODE_ENV !== "development" ? { secure: true as const } : {}),
 }
