@@ -4,6 +4,7 @@ import { streamText, generateText, tool, jsonSchema, type ModelMessage } from "a
 import type { RouteTarget } from "./routing"
 import { normalizeMessages } from "./message-normalizer"
 import { env } from "./env"
+import { SSE_HEADERS } from "./sse-headers"
 
 export interface CallResult {
   content: string
@@ -1050,7 +1051,7 @@ const stream = new ReadableStream({
   ;(stream as any)._zenStartedAt = requestStartedAt
 
   return {
-    response: new Response(stream, { headers: { "content-type": "text/event-stream" } }),
+    response: new Response(stream, { headers: SSE_HEADERS }),
     started,
     done,
   }

@@ -11,6 +11,7 @@ import { checkQuota, recordUsage } from "../lib/quota"
 import { hashPrompt, getCached, setCached } from "../lib/cache"
 import { calcCost } from "../lib/pricing"
 import { countInputTokens } from "../lib/tokens"
+import { SSE_HEADERS } from "../lib/sse-headers"
 
 export const gateway = new Hono()
 
@@ -242,7 +243,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       const sseBody = `data: ${JSON.stringify(errorBody)}\n\ndata: [DONE]\n\n`
       return new Response(sseBody, {
         status: statusCode,
-        headers: { "content-type": "text/event-stream" },
+        headers: SSE_HEADERS,
       })
     }
     return c.json(errorBody, statusCode)
@@ -277,7 +278,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           controller.close()
         },
       })
-      return new Response(s, { headers: { "content-type": "text/event-stream" } })
+      return new Response(s, { headers: SSE_HEADERS })
     }
     return c.json({
       id: `chatcmpl-cache-${Date.now()}`,
@@ -587,7 +588,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       })}\n\ndata: [DONE]\n\n`
       return new Response(body, {
         status: 413,
-        headers: { "content-type": "text/event-stream" },
+        headers: SSE_HEADERS,
       })
     }
     if (err instanceof UnsupportedCapabilityError) {
@@ -601,7 +602,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       })}\n\ndata: [DONE]\n\n`
       return new Response(body, {
         status: 400,
-        headers: { "content-type": "text/event-stream" },
+        headers: SSE_HEADERS,
       })
     }
     throw err
@@ -626,7 +627,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
     })}\n\ndata: [DONE]\n\n`
     return new Response(sseBody, {
       status,
-      headers: { "content-type": "text/event-stream" },
+      headers: SSE_HEADERS,
     })
   }
 
@@ -645,7 +646,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   })}\n\ndata: [DONE]\n\n`
   return new Response(sseBody, {
     status: tried.size === 0 ? 503 : 502,
-    headers: { "content-type": "text/event-stream" },
+    headers: SSE_HEADERS,
   })
 })
 
