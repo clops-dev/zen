@@ -855,19 +855,25 @@ const stream = new ReadableStream({
         stopHeartbeat()
       }
 
-      // SSE comment heartbeats keep Azure Container Apps ingress alive during
-      // slow connects / fallback retries (30 s idle timeout).
+      // SSE comment heartbeats keep Azure Container Apps ingress alive
+      // (~30s idle timeout) any time the wire goes quiet — not just before
+      // the first chunk. Reasoning models can go silent for 20-40s BETWEEN
+      // reasoning-delta chunks or between reasoning and the real answer;
+      // if we stop heartbeating after the first chunk (old behavior), that
+      // silent gap has zero bytes on the wire and Azure's ingress kills the
+      // connection with no error the app-level idle timer ever sees. So:
+      // this timer runs for the entire stream and only actually emits a
+      // heartbeat if nothing real has been sent recently.
+      let lastEnqueueAt = Date.now()
       heartbeatTimer = setInterval(() => {
-        if (gotAnyContent) {
-          stopHeartbeat()
-          return
-        }
+        if (Date.now() - lastEnqueueAt < 15_000) return
         try {
           controller.enqueue(encoder.encode(": heartbeat\n\n"))
+          lastEnqueueAt = Date.now()
         } catch {
           stopHeartbeat()
         }
-      }, 17_000)
+      }, 15_000)
 
       const iterator = result.fullStream[Symbol.asyncIterator]()
       try {
@@ -911,7 +917,6 @@ const stream = new ReadableStream({
           if (chunk.type === 'text-delta') {
             if (!gotAnyContent) {
               gotAnyContent = true
-              stopHeartbeat()
               settleStarted({ ok: true })
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
                 id, object: "chat.completion.chunk", created, model: modelLabel,
@@ -924,10 +929,10 @@ const stream = new ReadableStream({
               choices: [{ index: 0, delta: { content: chunk.text }, finish_reason: null }],
             }
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(responseChunk)}\n\n`))
+            lastEnqueueAt = Date.now()
           } else if (chunk.type === 'reasoning-delta') {
             if (!gotAnyContent) {
               gotAnyContent = true
-              stopHeartbeat()
               settleStarted({ ok: true })
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
                 id, object: "chat.completion.chunk", created, model: modelLabel,
@@ -939,10 +944,10 @@ const stream = new ReadableStream({
               choices: [{ index: 0, delta: { reasoning_content: chunk.text }, finish_reason: null }],
             }
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(responseChunk)}\n\n`))
+            lastEnqueueAt = Date.now()
           } else if (chunk.type === 'tool-call') {
             if (!gotAnyContent) {
               gotAnyContent = true
-              stopHeartbeat()
               settleStarted({ ok: true })
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
                 id, object: "chat.completion.chunk", created, model: modelLabel,
@@ -971,6 +976,7 @@ const stream = new ReadableStream({
               }],
             }
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(responseChunk)}\n\n`))
+            lastEnqueueAt = Date.now()
           } else if (chunk.type === 'error') {
             sdkRejection = (chunk as any).error
             break
