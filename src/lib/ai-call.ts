@@ -290,6 +290,225 @@ function makeAgentrouterFetchRewriter(baseUrl: string) {
   }
 }
 
+/**
+ * Create a custom fetch wrapper that intercepts and normalizes tool-call deltas
+ * in responses from OpenAI-compatible providers before they reach the AI SDK.
+ *
+ * Upstream models (such as `zebda/minimax/minimax-m2.7:free`) can send sparse,
+ * out-of-order, or malformed tool-call deltas (e.g. sending `index: 1` when index 0
+ * was never sent, omitting `index`, omitting `id`, or sending empty/non-object `tool_calls`).
+ *
+ * When passed to the AI SDK's `StreamingToolCallTracker`, sparse indices create
+ * `undefined` entries in the tracker's internal `this.toolCalls` array. Upon stream
+ * completion, the SDK's `flush()` handler iterates over `this.toolCalls` and evaluates
+ * `toolCall.hasFinished`. If an entry is `undefined`, it throws an uncaught
+ * `TypeError: undefined is not an object (evaluating 'toolCall.hasFinished')` that crashes
+ * the entire Bun process.
+ *
+ * This fetch wrapper normalizes tool-call deltas in SSE lines and JSON bodies:
+ * 1. Filtering out null/undefined/non-object tool calls.
+ * 2. Mapping raw indices to contiguous zero-based integers (0, 1, 2...).
+ * 3. Guaranteeing valid `id`, `type="function"`, and valid `function` `{ name, arguments }` objects.
+ */
+function makeToolCallNormalizingFetch(customFetch: (input: any, init?: any) => Promise<Response> = globalThis.fetch) {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const res = await customFetch(input, init)
+    if (!res.ok || !res.body) return res
+
+    const contentType = res.headers.get("content-type") ?? ""
+
+    if (contentType.includes("text/event-stream")) {
+      return normalizeSseToolCallResponse(res)
+    }
+
+    if (contentType.includes("application/json")) {
+      return normalizeJsonToolCallResponse(res)
+    }
+
+    return res
+  }
+}
+
+function normalizeSseToolCallResponse(res: Response): Response {
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+
+  // Per-stream normalization state
+  const indexMap = new Map<number | string, number>()
+  let nextContiguousIndex = 0
+  const toolCallStates = new Map<number, { id?: string }>()
+
+  let buffer = ""
+
+  function normalizeToolCalls(toolCalls: any[]): any[] {
+    if (!Array.isArray(toolCalls)) return []
+    const normalized: any[] = []
+
+    for (const tc of toolCalls) {
+      if (!tc || typeof tc !== "object") continue
+
+      // Determine raw index
+      let rawIndex: number | string | undefined = undefined
+      if (typeof tc.index === "number" && Number.isInteger(tc.index) && tc.index >= 0) {
+        rawIndex = tc.index
+      } else if (typeof tc.index === "string" && !isNaN(Number(tc.index)) && Number(tc.index) >= 0) {
+        rawIndex = Math.floor(Number(tc.index))
+      }
+
+      // Assign contiguous mapped index
+      let mappedIndex: number
+      if (rawIndex !== undefined) {
+        if (indexMap.has(rawIndex)) {
+          mappedIndex = indexMap.get(rawIndex)!
+        } else {
+          mappedIndex = nextContiguousIndex++
+          indexMap.set(rawIndex, mappedIndex)
+        }
+      } else {
+        // Missing index in delta chunk
+        let existingIndex: number | undefined
+        if (tc.id) {
+          for (const [idx, s] of toolCallStates.entries()) {
+            if (s.id === tc.id) { existingIndex = idx; break }
+          }
+        }
+        if (existingIndex !== undefined) {
+          mappedIndex = existingIndex
+        } else {
+          mappedIndex = nextContiguousIndex++
+        }
+      }
+
+      // State & ID tracking
+      const state = toolCallStates.get(mappedIndex) ?? {}
+      let id = tc.id ?? state.id
+      if (!id) {
+        id = `call_gen_${Date.now()}_${mappedIndex}`
+      }
+      toolCallStates.set(mappedIndex, { ...state, id })
+
+      // Function object normalization
+      let fn = tc.function
+      if (!fn || typeof fn !== "object") {
+        fn = { name: "", arguments: "" }
+      } else {
+        fn = {
+          name: typeof fn.name === "string" ? fn.name : (fn.name != null ? String(fn.name) : ""),
+          arguments: typeof fn.arguments === "string" ? fn.arguments : (fn.arguments != null ? normalizeToolArgs(fn.arguments) : ""),
+        }
+      }
+
+      normalized.push({
+        ...tc,
+        index: mappedIndex,
+        id,
+        type: typeof tc.type === "string" ? tc.type : "function",
+        function: fn,
+      })
+    }
+
+    return normalized
+  }
+
+  function transformLine(line: string): string {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith("data:")) return line
+
+    const payload = trimmed.slice(5).trim()
+    if (payload === "[DONE]" || !payload.startsWith("{")) return line
+
+    try {
+      const parsed = JSON.parse(payload)
+      if (parsed && Array.isArray(parsed.choices)) {
+        let modified = false
+        for (const choice of parsed.choices) {
+          if (choice?.delta?.tool_calls) {
+            choice.delta.tool_calls = normalizeToolCalls(choice.delta.tool_calls)
+            modified = true
+          }
+        }
+        if (modified) {
+          return `data: ${JSON.stringify(parsed)}`
+        }
+      }
+    } catch {
+      // Non-JSON data payload; return line as-is
+    }
+
+    return line
+  }
+
+  const stream = new ReadableStream({
+    async pull(controller) {
+      try {
+        const { value, done } = await reader.read()
+        if (done) {
+          if (buffer.trim()) {
+            const transformed = transformLine(buffer)
+            controller.enqueue(encoder.encode(transformed + "\n"))
+            buffer = ""
+          }
+          controller.close()
+          return
+        }
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split("\n")
+        buffer = lines.pop() ?? ""
+
+        for (const line of lines) {
+          const transformed = transformLine(line)
+          controller.enqueue(encoder.encode(transformed + "\n"))
+        }
+      } catch (err) {
+        controller.error(err)
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason)
+    },
+  })
+
+  return new Response(stream, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  })
+}
+
+async function normalizeJsonToolCallResponse(res: Response): Promise<Response> {
+  try {
+    const text = await res.text()
+    if (!text.trim().startsWith("{")) {
+      return new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
+    }
+    const parsed = JSON.parse(text)
+    if (parsed && Array.isArray(parsed.choices)) {
+      for (const choice of parsed.choices) {
+        if (choice?.message?.tool_calls && Array.isArray(choice.message.tool_calls)) {
+          choice.message.tool_calls = choice.message.tool_calls.filter(
+            (tc: any) => tc && typeof tc === "object"
+          ).map((tc: any, idx: number) => ({
+            ...tc,
+            index: typeof tc.index === "number" ? tc.index : idx,
+            id: tc.id ?? `call_gen_${Date.now()}_${idx}`,
+            type: tc.type ?? "function",
+            function: {
+              name: typeof tc.function?.name === "string" ? tc.function.name : "",
+              arguments: typeof tc.function?.arguments === "string" ? tc.function.arguments : normalizeToolArgs(tc.function?.arguments),
+            },
+          }))
+        }
+      }
+      return new Response(JSON.stringify(parsed), { status: res.status, statusText: res.statusText, headers: res.headers })
+    }
+    return new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
+  } catch {
+    return res
+  }
+}
+
 /** OpenAI-compatible adapter path. Exported for direct unit testing. */
 export function buildOpenAICompatibleModel(target: RouteTarget) {
   let baseUrl = target.baseUrl
@@ -315,6 +534,7 @@ export function buildOpenAICompatibleModel(target: RouteTarget) {
       "HTTP-Referer": env.APP_URL,
       "X-Title": "zen-gateway",
     },
+    fetch: makeToolCallNormalizingFetch(),
   })
   return provider(target.modelId)
 }
@@ -716,6 +936,9 @@ export function callStreaming(
     toolChoice: mapToolChoice(adapted.toolChoice),
     maxRetries: 0, // same reasoning as callNonStreaming — fail fast, let the gateway's cross-model fallback take over
     abortSignal: abortController.signal,
+    onError({ error }) {
+      if (!sdkRejection) sdkRejection = error
+    },
   })
 
   // @ai-sdk/streamText attaches several promises to the result object that
@@ -1000,8 +1223,18 @@ const stream = new ReadableStream({
           return
         }
 
-        const usage = await result.usage
-        const sdkFinishReason = await result.finishReason
+        let usage: any = { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+        let sdkFinishReason: string | undefined = undefined
+        try {
+          usage = (await result.usage) ?? usage
+        } catch (e) {
+          if (!sdkRejection) sdkRejection = e
+        }
+        try {
+          sdkFinishReason = await result.finishReason
+        } catch (e) {
+          if (!sdkRejection) sdkRejection = e
+        }
         const finishReason = toOpenAIFinishReason(sdkFinishReason, gotToolCalls)
         const finalChunk = {
           id, object: "chat.completion.chunk", created, model: modelLabel,

@@ -376,3 +376,122 @@ describe("ai-call stream: error body disguised as SSE", () => {
     }
   })
 })
+
+describe("ai-call malformed tool-call stream normalization", () => {
+  test("streaming: handles sparse tool-call index (e.g. index 1 without index 0) without crashing in flush", async () => {
+    const savedIdle = process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
+    process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING = "5000"
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        const enc = new TextEncoder()
+        const s = new ReadableStream({
+          start(controller) {
+            // Emits a tool call chunk with sparse index 1 (index 0 was skipped by upstream)
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({
+              id: "chatcmpl-test", object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000), model: "test-model",
+              choices: [{ index: 0, delta: {
+                tool_calls: [{
+                  index: 1,
+                  id: "call_abc123",
+                  type: "function",
+                  function: { name: "get_weather", arguments: "{\"location\":\"Paris\"}" }
+                }]
+              }, finish_reason: null }],
+            })}\n\n`))
+            controller.enqueue(enc.encode("data: [DONE]\n\n"))
+            controller.close()
+          },
+        })
+        return new Response(s, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" }
+        })
+      },
+    })
+    try {
+      const { response, started, done } = callStreaming(
+        {
+          modelRowId: "r", providerId: "p", providerName: "sparse-tool-call",
+          baseUrl: `http://127.0.0.1:${server.port}/v1`,
+          apiKey: "sk-test", modelId: "test-model", label: "sparse-tool-call/test-model",
+          inputPricePer1M: 0, outputPricePer1M: 0, contextWindow: 8192,
+          supportsTools: true, supportsVision: false, supportsJsonMode: false,
+          providerType: "openai-compatible",
+        },
+        [{ role: "user", content: "what is the weather?" }],
+        64, undefined, "sparse-tool-call/test-model",
+        [{ type: "function", function: { name: "get_weather" } }],
+      )
+      const readP = response.text().catch(() => "")
+      const startResult = await started
+      expect(startResult.ok).toBe(true)
+      const result = await done
+      expect(result).toBeDefined()
+      await readP
+    } finally {
+      server.stop()
+      if (savedIdle === undefined) delete process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
+      else process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING = savedIdle
+    }
+  })
+
+  test("streaming: handles tool-call chunk missing id, index, and function object without crashing", async () => {
+    const savedIdle = process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
+    process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING = "5000"
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        const enc = new TextEncoder()
+        const s = new ReadableStream({
+          start(controller) {
+            // Emits malformed tool_calls: null element, object missing index and function
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({
+              id: "chatcmpl-test", object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000), model: "test-model",
+              choices: [{ index: 0, delta: {
+                tool_calls: [
+                  null,
+                  { type: "function" }
+                ]
+              }, finish_reason: null }],
+            })}\n\n`))
+            controller.enqueue(enc.encode("data: [DONE]\n\n"))
+            controller.close()
+          },
+        })
+        return new Response(s, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" }
+        })
+      },
+    })
+    try {
+      const { response, started, done } = callStreaming(
+        {
+          modelRowId: "r", providerId: "p", providerName: "malformed-tool-call",
+          baseUrl: `http://127.0.0.1:${server.port}/v1`,
+          apiKey: "sk-test", modelId: "test-model", label: "malformed-tool-call/test-model",
+          inputPricePer1M: 0, outputPricePer1M: 0, contextWindow: 8192,
+          supportsTools: true, supportsVision: false, supportsJsonMode: false,
+          providerType: "openai-compatible",
+        },
+        [{ role: "user", content: "hi" }],
+        64, undefined, "malformed-tool-call/test-model",
+        [{ type: "function", function: { name: "test_tool" } }],
+      )
+      const readP = response.text().catch(() => "")
+      const startResult = await started
+      expect(startResult.ok).toBe(true)
+      const result = await done
+      expect(result).toBeDefined()
+      await readP
+    } finally {
+      server.stop()
+      if (savedIdle === undefined) delete process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
+      else process.env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING = savedIdle
+    }
+  })
+})
+
