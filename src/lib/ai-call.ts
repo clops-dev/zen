@@ -518,6 +518,27 @@ export function buildOpenAICompatibleModel(target: RouteTarget) {
     baseUrl = baseUrl.slice(0, -"/chat/completions".length)
   }
 
+  // Azure OpenAI endpoint formatting
+  if (baseUrl.toLowerCase().includes("openai.azure.com")) {
+    const parsedUrl = new URL(baseUrl)
+    if (!parsedUrl.pathname.includes("/openai/deployments/")) {
+      const cleanPath = parsedUrl.pathname.replace(/\/+$/, "")
+      parsedUrl.pathname = `${cleanPath}/openai/deployments/${target.modelId}`
+    }
+    if (!parsedUrl.searchParams.has("api-version")) {
+      parsedUrl.searchParams.set("api-version", "2024-02-01")
+    }
+    baseUrl = parsedUrl.toString()
+  }
+
+  const headers: Record<string, string> = {
+    "HTTP-Referer": env.APP_URL,
+    "X-Title": "zen-gateway",
+  }
+  if (target.apiKey) {
+    headers["api-key"] = target.apiKey
+  }
+
   const provider = createOpenAICompatible({
     name: target.providerName,
     baseURL: baseUrl,
@@ -530,11 +551,8 @@ export function buildOpenAICompatibleModel(target: RouteTarget) {
     // and (b) avoid being deprioritized on free models. We hardcode
     // X-Title to "zen-gateway" (our app name) and let APP_URL configure
     // the Referer per-deploy. Schema-enforced at boot in env.ts.
-    headers: {
-      "HTTP-Referer": env.APP_URL,
-      "X-Title": "zen-gateway",
-    },
-    fetch: makeToolCallNormalizingFetch(),
+    headers,
+    fetch: makeToolCallNormalizingFetch() as unknown as typeof fetch,
   })
   return provider(target.modelId)
 }

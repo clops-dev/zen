@@ -487,7 +487,10 @@ adminApi.post("/providers/:id/test", async (c) => {
     if (!p) return jsonError(c, 404, "not_found")
     const url = `${p.base_url.replace(/\/$/, "")}${p.provider_type === "anthropic-compatible" ? "" : "/models"}`
     const headers: Record<string, string> = {}
-    if (p.api_key) headers.Authorization = `Bearer ${p.api_key}`
+    if (p.api_key) {
+      headers.Authorization = `Bearer ${p.api_key}`
+      headers["api-key"] = p.api_key
+    }
     const start = Date.now()
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) })
     const latency = Date.now() - start
