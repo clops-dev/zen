@@ -671,7 +671,7 @@ gateway.post("/embeddings", requireApiKey(), rateLimit(30, 60_000), async (c) =>
     
     return c.json({
       object: "list",
-      data: inputs.map((_, index) => ({
+      data: inputs.map((_: unknown, index: number) => ({
         object: "embedding",
         // Replace this with actual embeddings from your provider
         embedding: new Array(dimensions).fill(0),

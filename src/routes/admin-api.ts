@@ -206,6 +206,7 @@ const userCreateSchema = z.object({
   password: z.string().min(8).max(256),
   role: z.enum(["user", "admin"]).default("user"),
   tier: z.enum(["free", "pro", "enterprise"]).default("free"),
+  subscription_price_usd: z.coerce.number().min(0).optional(),
   token_budget_monthly: z.coerce.number().int().min(0).default(50000),
   spending_cap_usd: z.coerce.number().min(0).optional().nullable(),
   spending_cap_enabled: z.boolean().default(false),
@@ -217,7 +218,7 @@ adminApi.post("/users", async (c) => {
   const body = await c.req.json().catch(() => null)
   const parsed = userCreateSchema.safeParse(body)
   if (!parsed.success) return jsonError(c, 400, "invalid_payload", JSON.stringify(parsed.error.flatten()))
-  const { email, password, role, tier, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period } = parsed.data
+  const { email, password, role, tier, subscription_price_usd, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period } = parsed.data
   try {
     const existing = await sql`SELECT id FROM users WHERE email = ${email}`
     if (existing.length > 0) return jsonError(c, 409, "email_taken")
@@ -227,16 +228,32 @@ adminApi.post("/users", async (c) => {
       INSERT INTO users (email, password_hash, role) VALUES (${email}, ${hash}, ${role}) RETURNING id
     `
     const cap = spending_cap_usd !== undefined ? spending_cap_usd : null
-    await sql`
-      INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period)
-      VALUES (${u.id}, ${tier}, 'active', ${token_budget_monthly}, ${cap}, ${spending_cap_enabled}, ${spending_cap_period})
-      ON CONFLICT (user_id) DO UPDATE SET
-        tier=${tier},
-        token_budget_monthly=${token_budget_monthly},
-        spending_cap_usd=${cap},
-        spending_cap_enabled=${spending_cap_enabled},
-        spending_cap_period=${spending_cap_period}
-    `
+    const price = subscription_price_usd !== undefined ? subscription_price_usd : (tier === "pro" ? 20 : tier === "enterprise" ? 100 : 0)
+    const hasPriceCol = await requireColumn("subscriptions", "subscription_price_usd")
+    if (hasPriceCol) {
+      await sql`
+        INSERT INTO subscriptions (user_id, tier, status, subscription_price_usd, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period)
+        VALUES (${u.id}, ${tier}, 'active', ${price}, ${token_budget_monthly}, ${cap}, ${spending_cap_enabled}, ${spending_cap_period})
+        ON CONFLICT (user_id) DO UPDATE SET
+          tier=${tier},
+          subscription_price_usd=${price},
+          token_budget_monthly=${token_budget_monthly},
+          spending_cap_usd=${cap},
+          spending_cap_enabled=${spending_cap_enabled},
+          spending_cap_period=${spending_cap_period}
+      `
+    } else {
+      await sql`
+        INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period)
+        VALUES (${u.id}, ${tier}, 'active', ${token_budget_monthly}, ${cap}, ${spending_cap_enabled}, ${spending_cap_period})
+        ON CONFLICT (user_id) DO UPDATE SET
+          tier=${tier},
+          token_budget_monthly=${token_budget_monthly},
+          spending_cap_usd=${cap},
+          spending_cap_enabled=${spending_cap_enabled},
+          spending_cap_period=${spending_cap_period}
+      `
+    }
     await audit({
       actorId: session.userId,
       actorEmail: await actorEmailFor(session.userId),
@@ -244,7 +261,7 @@ adminApi.post("/users", async (c) => {
       resource: "user",
       resourceId: u.id,
       ip: ip(c),
-      metadata: { email, role, tier, spending_cap_usd: cap, spending_cap_enabled },
+      metadata: { email, role, tier, subscription_price_usd: price, spending_cap_usd: cap, spending_cap_enabled },
     })
     return c.json({ id: u.id, email, role, tier })
   } catch (err) {
@@ -256,6 +273,7 @@ const userUpdateSchema = z.object({
   role: z.enum(["user", "admin"]).optional(),
   tier: z.enum(["free", "pro", "enterprise"]).optional(),
   status: z.enum(["active", "suspended"]).optional(),
+  subscription_price_usd: z.coerce.number().min(0).optional(),
   token_budget_monthly: z.coerce.number().int().min(0).optional(),
   spending_cap_usd: z.coerce.number().min(0).optional().nullable(),
   spending_cap_enabled: z.boolean().optional(),
@@ -273,27 +291,44 @@ adminApi.patch("/users/:id", async (c) => {
     if (existing.length === 0) return jsonError(c, 404, "not_found")
     if (parsed.data.role) await sql`UPDATE users SET role = ${parsed.data.role} WHERE id = ${id}`
     if (
-      parsed.data.tier || parsed.data.status || parsed.data.token_budget_monthly !== undefined ||
+      parsed.data.tier || parsed.data.status || parsed.data.subscription_price_usd !== undefined || parsed.data.token_budget_monthly !== undefined ||
       parsed.data.spending_cap_usd !== undefined || parsed.data.spending_cap_enabled !== undefined || parsed.data.spending_cap_period !== undefined
     ) {
       const tier = parsed.data.tier ?? null
       const status = parsed.data.status ?? null
+      const subPrice = parsed.data.subscription_price_usd !== undefined ? parsed.data.subscription_price_usd : null
       const budget = parsed.data.token_budget_monthly ?? null
       const capUsd = parsed.data.spending_cap_usd !== undefined ? parsed.data.spending_cap_usd : null
       const capEnabled = parsed.data.spending_cap_enabled !== undefined ? parsed.data.spending_cap_enabled : null
       const capPeriod = parsed.data.spending_cap_period ?? null
 
-      await sql`
-        INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period)
-        VALUES (${id}, ${parsed.data.tier ?? "free"}, ${parsed.data.status ?? "active"}, ${parsed.data.token_budget_monthly ?? 50000}, ${capUsd}, ${parsed.data.spending_cap_enabled ?? false}, ${parsed.data.spending_cap_period ?? "monthly"})
-        ON CONFLICT (user_id) DO UPDATE SET
-          tier = COALESCE(${tier}::text, subscriptions.tier),
-          status = COALESCE(${status}::text, subscriptions.status),
-          token_budget_monthly = COALESCE(${budget}::bigint, subscriptions.token_budget_monthly),
-          spending_cap_usd = CASE WHEN ${parsed.data.spending_cap_usd !== undefined} THEN ${capUsd}::numeric ELSE subscriptions.spending_cap_usd END,
-          spending_cap_enabled = CASE WHEN ${parsed.data.spending_cap_enabled !== undefined} THEN ${capEnabled}::boolean ELSE subscriptions.spending_cap_enabled END,
-          spending_cap_period = COALESCE(${capPeriod}::text, subscriptions.spending_cap_period)
-      `
+      const hasPriceCol = await requireColumn("subscriptions", "subscription_price_usd")
+      if (hasPriceCol) {
+        await sql`
+          INSERT INTO subscriptions (user_id, tier, status, subscription_price_usd, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period)
+          VALUES (${id}, ${parsed.data.tier ?? "free"}, ${parsed.data.status ?? "active"}, ${subPrice ?? 0}, ${parsed.data.token_budget_monthly ?? 50000}, ${capUsd}, ${parsed.data.spending_cap_enabled ?? false}, ${parsed.data.spending_cap_period ?? "monthly"})
+          ON CONFLICT (user_id) DO UPDATE SET
+            tier = COALESCE(${tier}::text, subscriptions.tier),
+            status = COALESCE(${status}::text, subscriptions.status),
+            subscription_price_usd = CASE WHEN ${parsed.data.subscription_price_usd !== undefined} THEN ${subPrice}::numeric ELSE subscriptions.subscription_price_usd END,
+            token_budget_monthly = COALESCE(${budget}::bigint, subscriptions.token_budget_monthly),
+            spending_cap_usd = CASE WHEN ${parsed.data.spending_cap_usd !== undefined} THEN ${capUsd}::numeric ELSE subscriptions.spending_cap_usd END,
+            spending_cap_enabled = CASE WHEN ${parsed.data.spending_cap_enabled !== undefined} THEN ${capEnabled}::boolean ELSE subscriptions.spending_cap_enabled END,
+            spending_cap_period = COALESCE(${capPeriod}::text, subscriptions.spending_cap_period)
+        `
+      } else {
+        await sql`
+          INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period)
+          VALUES (${id}, ${parsed.data.tier ?? "free"}, ${parsed.data.status ?? "active"}, ${parsed.data.token_budget_monthly ?? 50000}, ${capUsd}, ${parsed.data.spending_cap_enabled ?? false}, ${parsed.data.spending_cap_period ?? "monthly"})
+          ON CONFLICT (user_id) DO UPDATE SET
+            tier = COALESCE(${tier}::text, subscriptions.tier),
+            status = COALESCE(${status}::text, subscriptions.status),
+            token_budget_monthly = COALESCE(${budget}::bigint, subscriptions.token_budget_monthly),
+            spending_cap_usd = CASE WHEN ${parsed.data.spending_cap_usd !== undefined} THEN ${capUsd}::numeric ELSE subscriptions.spending_cap_usd END,
+            spending_cap_enabled = CASE WHEN ${parsed.data.spending_cap_enabled !== undefined} THEN ${capEnabled}::boolean ELSE subscriptions.spending_cap_enabled END,
+            spending_cap_period = COALESCE(${capPeriod}::text, subscriptions.spending_cap_period)
+        `
+      }
     }
     await audit({
       actorId: session.userId,
@@ -327,6 +362,101 @@ adminApi.delete("/users/:id", async (c) => {
     return c.json({ ok: true })
   } catch (err) {
     return jsonError(c, 500, "user_delete_failed", err instanceof Error ? err.message : String(err))
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Wallet & Subscription Income / Usage Endpoint
+// ---------------------------------------------------------------------------
+
+adminApi.get("/wallet/summary", async (c) => {
+  try {
+    const hasPriceCol = await requireColumn("subscriptions", "subscription_price_usd")
+
+    const userRows = await sql`
+      SELECT
+        u.id,
+        u.email,
+        u.role,
+        u.created_at,
+        COALESCE(s.tier, 'free') AS tier,
+        COALESCE(s.status, 'active') AS subscription_status,
+        ${hasPriceCol ? sql`COALESCE(s.subscription_price_usd, 0)` : sql`0`} AS subscription_price_usd,
+        COALESCE(SUM(r.cost_usd), 0) AS usage_cost_usd,
+        COALESCE(COUNT(r.id), 0) AS total_requests,
+        COALESCE(SUM(r.input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(r.output_tokens), 0) AS output_tokens,
+        MAX(r.created_at) AS last_active_at
+      FROM users u
+      LEFT JOIN subscriptions s ON s.user_id = u.id
+      LEFT JOIN ai_requests r ON r.user_id = u.id
+      GROUP BY u.id, u.email, u.role, u.created_at, s.tier, s.status${hasPriceCol ? sql`, s.subscription_price_usd` : sql``}
+      ORDER BY u.created_at DESC
+    `
+
+    let accumulatedIncome = 0
+    let accumulatedUsageCost = 0
+    let totalRequests = 0
+    let totalInputTokens = 0
+    let totalOutputTokens = 0
+    let activeUsersCount = 0
+
+    const users = userRows.map((r: any) => {
+      const subPrice = Number(Number(r.subscription_price_usd || 0).toFixed(6))
+      const usageCost = Number(Number(r.usage_cost_usd || 0).toFixed(6))
+      const netIncome = Number((subPrice - usageCost).toFixed(6))
+      const reqCount = Number(r.total_requests || 0)
+      const inTokens = Number(r.input_tokens || 0)
+      const outTokens = Number(r.output_tokens || 0)
+      const totTokens = inTokens + outTokens
+
+      accumulatedIncome += subPrice
+      accumulatedUsageCost += usageCost
+      totalRequests += reqCount
+      totalInputTokens += inTokens
+      totalOutputTokens += outTokens
+      if (reqCount > 0 || r.subscription_status === "active") {
+        activeUsersCount++
+      }
+
+      return {
+        id: r.id,
+        email: r.email,
+        role: r.role,
+        tier: r.tier,
+        subscription_status: r.subscription_status,
+        subscription_price_usd: subPrice.toFixed(6),
+        usage_cost_usd: usageCost.toFixed(6),
+        net_income_usd: netIncome.toFixed(6),
+        total_requests: reqCount,
+        input_tokens: inTokens,
+        output_tokens: outTokens,
+        total_tokens: totTokens,
+        last_active_at: r.last_active_at ?? null,
+      }
+    })
+
+    const accumulatedNetIncome = Number((accumulatedIncome - accumulatedUsageCost).toFixed(6))
+    const totalTokens = totalInputTokens + totalOutputTokens
+
+    return c.json({
+      totals: {
+        accumulated_users: users.length,
+        active_users: activeUsersCount,
+        total_subscription_income_usd: accumulatedIncome.toFixed(6),
+        total_usage_cost_usd: accumulatedUsageCost.toFixed(6),
+        total_net_income_usd: accumulatedNetIncome.toFixed(6),
+        total_requests: totalRequests,
+        total_input_tokens: totalInputTokens,
+        total_output_tokens: totalOutputTokens,
+        total_tokens: totalTokens,
+        avg_income_per_user_usd: users.length > 0 ? (accumulatedIncome / users.length).toFixed(6) : "0.000000",
+        avg_cost_per_user_usd: users.length > 0 ? (accumulatedUsageCost / users.length).toFixed(6) : "0.000000",
+      },
+      users,
+    })
+  } catch (err) {
+    return jsonError(c, 500, "wallet_summary_failed", err instanceof Error ? err.message : String(err))
   }
 })
 

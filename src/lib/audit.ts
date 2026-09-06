@@ -19,6 +19,7 @@ export type AuditAction =
   | "provider.disable"
   | "provider.delete"
   | "provider.test"
+  | "provider.reset_health"
   // model mgmt
   | "model.create"
   | "model.update"

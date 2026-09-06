@@ -262,6 +262,41 @@ export const createApiKey = (body: any) => request<{ id: string; api_key: string
 export const revokeApiKey = (id: string) => request<{ ok: true }>(`/admin-api/api-keys/${id}/revoke`, { method: "POST" })
 export const rotateApiKey = (id: string) => request<{ id: string; api_key: string; prefix: string; created_at: string }>(`/admin-api/api-keys/${id}/rotate`, { method: "POST" })
 
+export type WalletUser = {
+  id: string
+  email: string
+  role: "admin" | "user"
+  tier: string
+  subscription_status: string
+  subscription_price_usd: string
+  usage_cost_usd: string
+  net_income_usd: string
+  total_requests: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  last_active_at: string | null
+}
+
+export type WalletTotals = {
+  accumulated_users: number
+  active_users: number
+  total_subscription_income_usd: string
+  total_usage_cost_usd: string
+  total_net_income_usd: string
+  total_requests: number
+  total_input_tokens: number
+  total_output_tokens: number
+  total_tokens: number
+  avg_income_per_user_usd: string
+  avg_cost_per_user_usd: string
+}
+
+export type WalletSummary = {
+  totals: WalletTotals
+  users: WalletUser[]
+}
+
 export const listRequests = (q: Record<string, string | number | undefined>) => {
   const usp = new URLSearchParams()
   for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "") usp.set(k, String(v))
@@ -273,5 +308,7 @@ export const listAudit = (q: Record<string, string | number | undefined>) => {
   for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "") usp.set(k, String(v))
   return request<{ events: AuditEvent[] }>(`/admin-api/audit?${usp.toString()}`)
 }
+
+export const walletSummary = () => request<WalletSummary>("/admin-api/wallet/summary")
 
 export const settings = () => request<any>("/admin-api/settings")

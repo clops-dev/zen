@@ -8,6 +8,7 @@ import {
   GitBranch,
   Boxes,
   Users,
+  Wallet,
   ShieldCheck,
   ScrollText,
   Settings as SettingsIcon,
@@ -23,6 +24,7 @@ const items: readonly NavItem[] = [
   { to: "/routing", label: "Routing", icon: Network },
   { to: "/combos", label: "Combos", icon: Boxes, badge: "NEW" },
   { to: "/api-keys", label: "API Keys", icon: KeyRound },
+  { to: "/wallet", label: "Wallet", icon: Wallet, badge: "NEW" },
   { to: "/requests", label: "Requests", icon: GitBranch },
   { to: "/users", label: "Users", icon: Users },
   { to: "/audit", label: "Audit Logs", icon: ScrollText },
@@ -31,7 +33,7 @@ const items: readonly NavItem[] = [
 
 const group1 = ["Overview"]
 const group2 = ["Providers", "Models", "Routing", "Combos", "API Keys"]
-const group3 = ["Requests", "Users", "Audit Logs", "Settings"]
+const group3 = ["Wallet", "Requests", "Users", "Audit Logs", "Settings"]
 
 export function Sidebar() {
   return (
