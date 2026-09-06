@@ -93,4 +93,28 @@ describe("Azure OpenAI / Microsoft Foundry Provider Support", () => {
     expect(model).toBeDefined()
     expect(model.modelId).toBe("gpt-4o")
   })
+
+  it("normalizes Microsoft Foundry root endpoints (services.ai.azure.com) to append /openai/v1", () => {
+    const target: RouteTarget = {
+      modelRowId: "test-row-id-foundry-root",
+      providerId: "test-provider-id-foundry-root",
+      providerName: "foundry-v1",
+      baseUrl: "https://mohamedaminkhelifa-1459-resource.services.ai.azure.com",
+      apiKey: "foundry-key-789",
+      modelId: "gpt-5.1-codex-mini",
+      label: "foundry-v1/gpt-5.1-codex-mini",
+      inputPricePer1M: 0.15,
+      outputPricePer1M: 0.6,
+      contextWindow: 128000,
+      supportsTools: true,
+      supportsVision: true,
+      supportsJsonMode: true,
+      providerType: "openai-compatible",
+    }
+
+    const model = buildOpenAICompatibleModel(target)
+    expect(model).toBeDefined()
+    expect(model.modelId).toBe("gpt-5.1-codex-mini")
+  })
 })
+

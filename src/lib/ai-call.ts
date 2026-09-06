@@ -310,9 +310,174 @@ function makeAgentrouterFetchRewriter(baseUrl: string) {
  * 2. Mapping raw indices to contiguous zero-based integers (0, 1, 2...).
  * 3. Guaranteeing valid `id`, `type="function"`, and valid `function` `{ name, arguments }` objects.
  */
+async function normalizeResponsesApiResponse(res: Response): Promise<Response> {
+  const contentType = res.headers.get("content-type") ?? ""
+  if (contentType.includes("application/json")) {
+    const text = await res.text()
+    try {
+      const json = JSON.parse(text)
+      if (json.object === "response" && Array.isArray(json.output)) {
+        const msgObj = json.output.find((o: any) => o.type === "message")
+        const msgText = msgObj?.content?.[0]?.text ?? ""
+        const chatCompletion = {
+          id: json.id,
+          object: "chat.completion",
+          created: json.created_at ?? Math.floor(Date.now() / 1000),
+          model: json.model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: msgText,
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: {
+            prompt_tokens: json.usage?.input_tokens ?? 0,
+            completion_tokens: json.usage?.output_tokens ?? 0,
+            total_tokens: json.usage?.total_tokens ?? 0,
+          },
+        }
+        return new Response(JSON.stringify(chatCompletion), {
+          status: res.status,
+          statusText: res.statusText,
+          headers: res.headers,
+        })
+      }
+    } catch {}
+    return new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
+  }
+
+  if (contentType.includes("text/event-stream")) {
+    return transformResponsesSseToChatCompletionsSse(res)
+  }
+
+  return res
+}
+
+function transformResponsesSseToChatCompletionsSse(res: Response): Response {
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+  let buffer = ""
+
+  function transformLine(line: string): string | null {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith("data:")) return null
+    const payload = trimmed.slice(5).trim()
+    if (payload === "[DONE]") return line
+    if (!payload.startsWith("{")) return null
+
+    try {
+      const parsed = JSON.parse(payload)
+      if (parsed.type === "response.output_text.delta" && typeof parsed.delta === "string") {
+        const chunk = {
+          id: parsed.item_id ?? `chatcmpl_${Date.now()}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          choices: [
+            {
+              index: parsed.content_index ?? 0,
+              delta: { content: parsed.delta },
+              finish_reason: null,
+            },
+          ],
+        }
+        return `data: ${JSON.stringify(chunk)}`
+      }
+      if (parsed.type === "response.completed") {
+        const finishChunk = {
+          id: parsed.response?.id ?? `chatcmpl_${Date.now()}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: "stop",
+            },
+          ],
+        }
+        return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
+      }
+    } catch {}
+    return null
+  }
+
+  const stream = new ReadableStream({
+    async pull(controller) {
+      try {
+        const { value, done } = await reader.read()
+        if (done) {
+          if (buffer.trim()) {
+            const transformed = transformLine(buffer)
+            if (transformed) controller.enqueue(encoder.encode(transformed + "\n"))
+            buffer = ""
+          }
+          controller.close()
+          return
+        }
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split("\n")
+        buffer = lines.pop() ?? ""
+
+        for (const line of lines) {
+          const transformed = transformLine(line)
+          if (transformed) controller.enqueue(encoder.encode(transformed + "\n"))
+        }
+      } catch (err) {
+        controller.error(err)
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason)
+    },
+  })
+
+  return new Response(stream, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  })
+}
+
 function makeToolCallNormalizingFetch(customFetch: (input: any, init?: any) => Promise<Response> = globalThis.fetch) {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const res = await customFetch(input, init)
+    let url = typeof input === "string" ? input : input instanceof Request ? input.url : String((input as any)?.url ?? "")
+
+    let res = await customFetch(input, init)
+
+    // Fallback/translation for Azure AI Foundry / OpenAI Responses API endpoints
+    if (!res.ok && url.endsWith("/chat/completions")) {
+      const clonedRes = res.clone()
+      try {
+        const errJson = await clonedRes.json()
+        const errMsg = errJson?.error?.message ?? ""
+        if (errMsg.includes("operation is unsupported") || errMsg.includes("Unsupported parameter") || errMsg.includes("Responses API")) {
+          const responsesUrl = url.replace(/\/chat\/completions$/, "/responses")
+          let newInit = { ...(init ?? {}) }
+          if (newInit.body && typeof newInit.body === "string") {
+            try {
+              const body = JSON.parse(newInit.body)
+              if (body.messages) {
+                body.input = body.messages
+                delete body.messages
+              }
+              newInit.body = JSON.stringify(body)
+            } catch {}
+          }
+
+          const responsesRes = await customFetch(responsesUrl, newInit)
+          if (responsesRes.ok && responsesRes.body) {
+            return normalizeResponsesApiResponse(responsesRes)
+          }
+        }
+      } catch {}
+    }
+
     if (!res.ok || !res.body) return res
 
     const contentType = res.headers.get("content-type") ?? ""
