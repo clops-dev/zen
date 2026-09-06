@@ -518,15 +518,20 @@ export function buildOpenAICompatibleModel(target: RouteTarget) {
     baseUrl = baseUrl.slice(0, -"/chat/completions".length)
   }
 
-  // Azure OpenAI endpoint formatting
-  if (baseUrl.toLowerCase().includes("openai.azure.com")) {
+  const lowerUrl = baseUrl.toLowerCase()
+  const isAzure = lowerUrl.includes("openai.azure.com") || lowerUrl.includes("services.ai.azure.com")
+  const isAzureV1 = isAzure && lowerUrl.includes("/openai/v1")
+  const isAzureClassic = isAzure && !isAzureV1
+
+  // Classic Azure deployment API formatting
+  if (isAzureClassic) {
     const parsedUrl = new URL(baseUrl)
     if (!parsedUrl.pathname.includes("/openai/deployments/")) {
       const cleanPath = parsedUrl.pathname.replace(/\/+$/, "")
       parsedUrl.pathname = `${cleanPath}/openai/deployments/${target.modelId}`
     }
     if (!parsedUrl.searchParams.has("api-version")) {
-      parsedUrl.searchParams.set("api-version", "2024-02-01")
+      parsedUrl.searchParams.set("api-version", "2024-10-21")
     }
     baseUrl = parsedUrl.toString()
   }
@@ -536,21 +541,18 @@ export function buildOpenAICompatibleModel(target: RouteTarget) {
     "X-Title": "zen-gateway",
   }
   if (target.apiKey) {
-    headers["api-key"] = target.apiKey
+    if (isAzure) {
+      headers["api-key"] = target.apiKey
+    } else {
+      headers["api-key"] = target.apiKey
+    }
   }
 
   const provider = createOpenAICompatible({
     name: target.providerName,
     baseURL: baseUrl,
-    // Some providers (e.g. a local Ollama instance) don't require a key at
-    // all — an empty string here means the SDK just won't send an
-    // Authorization header if you pass undefined instead of "".
-    apiKey: target.apiKey || undefined,
-    // OpenRouter requires HTTP-Referer and recommends X-Title on every
-    // request. They (a) let users see which app is calling their account
-    // and (b) avoid being deprioritized on free models. We hardcode
-    // X-Title to "zen-gateway" (our app name) and let APP_URL configure
-    // the Referer per-deploy. Schema-enforced at boot in env.ts.
+    // Avoid sending conflicting Authorization: Bearer header when api-key header is used for Azure.
+    apiKey: isAzure ? undefined : (target.apiKey || undefined),
     headers,
     fetch: makeToolCallNormalizingFetch() as unknown as typeof fetch,
   })

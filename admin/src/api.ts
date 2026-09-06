@@ -45,8 +45,12 @@ export type Provider = {
   provider_type: "openai-compatible" | "anthropic-compatible"
   enabled: boolean
   healthy: boolean
+  health_state?: "HEALTHY" | "DEGRADED" | "DOWN" | "RECOVERING"
   consecutive_failures: number
   last_failure_at: string | null
+  cooldown_until?: string | null
+  last_failure_reason?: string | null
+  last_success_at?: string | null
   created_at: string
   has_key: boolean
   key_preview: string
@@ -128,6 +132,12 @@ export type User = {
   tier: string
   subscription_status: string
   token_budget_monthly: number
+  spending_cap_usd?: number | null
+  spending_cap_enabled?: boolean
+  spending_cap_period?: string
+  current_usage_usd?: number
+  remaining_cap_usd?: number | null
+  limit_status?: "within_limit" | "limit_reached" | "unlimited"
   active_keys: number
   total_requests: number
   total_cost: number | string
@@ -207,6 +217,7 @@ export const createProvider = (body: any) => request<{ id: string; name: string 
 export const updateProvider = (id: string, body: any) => request<{ ok: true }>(`/admin-api/providers/${id}`, { method: "PATCH", body: JSON.stringify(body) })
 export const toggleProvider = (id: string) => request<{ ok: true; enabled: boolean }>(`/admin-api/providers/${id}/toggle`, { method: "POST" })
 export const testProvider = (id: string) => request<{ ok: boolean; status: number; latency_ms: number }>(`/admin-api/providers/${id}/test`, { method: "POST" })
+export const resetProviderHealth = (id: string) => request<{ ok: true }>(`/admin-api/providers/${id}/reset-health`, { method: "POST" })
 export const deleteProvider = (id: string) => request<{ ok: true }>(`/admin-api/providers/${id}`, { method: "DELETE" })
 
 export const listModels = () => request<{ models: Model[] }>("/admin-api/models")

@@ -100,15 +100,13 @@ async function getTierCandidates(tier: ComplexityTier): Promise<Candidate[]> {
       m.supports_tools, m.supports_vision, m.supports_json_mode,
       p.provider_type,
       tr.weight::float8 AS weight,
-      p.healthy, p.last_failure_at
+      p.healthy, p.health_state, p.last_failure_at, p.cooldown_until
     FROM tier_routes tr
     JOIN models m ON m.id = tr.model_id
     JOIN providers p ON p.id = m.provider_id
     WHERE tr.tier = ${tier} AND tr.enabled = true AND m.enabled = true AND p.enabled = true
   `) as any
-  return rows.filter(
-    (r: any) => r.healthy || (r.last_failure_at && now - new Date(r.last_failure_at).getTime() > COOLDOWN_MS),
-  )
+  return rows.filter((r: any) => isCandidateAvailable(r, now))
 }
 
 async function getAnyCandidate(): Promise<Candidate[]> {
@@ -123,14 +121,26 @@ async function getAnyCandidate(): Promise<Candidate[]> {
       m.supports_tools, m.supports_vision, m.supports_json_mode,
       p.provider_type,
       1::float8 AS weight,
-      p.healthy, p.last_failure_at
+      p.healthy, p.health_state, p.last_failure_at, p.cooldown_until
     FROM models m
     JOIN providers p ON p.id = m.provider_id
     WHERE m.enabled = true AND p.enabled = true
   `) as any
-  return rows.filter(
-    (r: any) => r.healthy || (r.last_failure_at && now - new Date(r.last_failure_at).getTime() > COOLDOWN_MS),
-  )
+  return rows.filter((r: any) => isCandidateAvailable(r, now))
+}
+
+function isCandidateAvailable(r: any, now: number): boolean {
+  const state = r.health_state ?? (r.healthy ? "HEALTHY" : "DOWN")
+  if (state === "HEALTHY" || state === "DEGRADED" || state === "RECOVERING") return true
+
+  // DOWN state check for automatic recovery after cooldown
+  if (r.cooldown_until && now >= new Date(r.cooldown_until).getTime()) {
+    return true
+  }
+  if (!r.cooldown_until && r.last_failure_at && now - new Date(r.last_failure_at).getTime() > COOLDOWN_MS) {
+    return true
+  }
+  return false
 }
 
 function toTarget(c: Candidate): RouteTarget {
@@ -259,17 +269,89 @@ export async function pickRoute(
   return null
 }
 
-export async function reportRouteOutcome(providerId: string, success: boolean): Promise<void> {
+export type RouteOutcomeOpts = {
+  success: boolean
+  error?: unknown
+  retryAfterSeconds?: number
+}
+
+export async function reportRouteOutcome(
+  providerId: string,
+  outcome: boolean | RouteOutcomeOpts,
+): Promise<void> {
+  const isSuccess = typeof outcome === "boolean" ? outcome : outcome.success
+  const err = typeof outcome === "boolean" ? undefined : outcome.error
+  const retryAfterSec = typeof outcome === "object" ? outcome.retryAfterSeconds : undefined
+
   try {
-    if (success) {
-      await withDbResilience(() => sql`UPDATE providers SET healthy = true, consecutive_failures = 0 WHERE id = ${providerId}`)
+    if (isSuccess) {
+      await withDbResilience(() => sql`
+        UPDATE providers
+        SET healthy = true,
+            health_state = 'HEALTHY',
+            consecutive_failures = 0,
+            last_success_at = now(),
+            cooldown_until = NULL,
+            last_failure_reason = NULL
+        WHERE id = ${providerId}
+      `)
       return
     }
+
+    let isTransient = true
+    let isAuthError = false
+    let reasonLabel = "unknown_failure"
+
+    if (err) {
+      const { classifyProviderError } = await import("./ai-call")
+      const c = classifyProviderError(err)
+      reasonLabel = `${c.kind}${c.statusCode ? ` (${c.statusCode})` : ""}`
+      if (c.action === "break_loop") {
+        // Permanent request / client error (400 Bad Request, etc.) - do not mark provider DOWN as temporary outage
+        isTransient = false
+      } else if (c.action === "skip_candidate" && (c.kind === "unauthorized" || c.kind === "forbidden")) {
+        isAuthError = true
+      }
+    }
+
+    if (!isTransient && !isAuthError) {
+      return
+    }
+
+    const cooldownMs = retryAfterSec ? retryAfterSec * 1000 : COOLDOWN_MS
+    const cooldownIntervalSeconds = Math.ceil(cooldownMs / 1000)
+
+    if (isAuthError) {
+      await withDbResilience(() => sql`
+        UPDATE providers
+        SET healthy = false,
+            health_state = 'DEGRADED',
+            consecutive_failures = consecutive_failures + 1,
+            last_failure_at = now(),
+            last_failure_reason = ${reasonLabel}
+        WHERE id = ${providerId}
+      `)
+      return
+    }
+
     await withDbResilience(() => sql`
       UPDATE providers
       SET consecutive_failures = consecutive_failures + 1,
           last_failure_at = now(),
-          healthy = (consecutive_failures + 1) < ${FAILURE_THRESHOLD}
+          last_failure_reason = ${reasonLabel},
+          health_state = CASE
+            WHEN (consecutive_failures + 1) >= ${FAILURE_THRESHOLD} OR health_state = 'RECOVERING' THEN 'DOWN'
+            ELSE 'DEGRADED'
+          END,
+          healthy = CASE
+            WHEN (consecutive_failures + 1) >= ${FAILURE_THRESHOLD} OR health_state = 'RECOVERING' THEN false
+            ELSE true
+          END,
+          cooldown_until = CASE
+            WHEN (consecutive_failures + 1) >= ${FAILURE_THRESHOLD} OR health_state = 'RECOVERING'
+              THEN now() + (${cooldownIntervalSeconds + " seconds"})::interval
+            ELSE cooldown_until
+          END
       WHERE id = ${providerId}
     `)
   } catch (err) {

@@ -1,6 +1,6 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowRight, Loader2, Plus, Power, Trash2 } from "lucide-react"
+import { ArrowRight, Plus, Power, Trash2 } from "lucide-react"
 import { createRoute, deleteRoute, listModels, listProviders, listRoutes, toggleRoute } from "../api"
 import { Modal } from "../ui/Modal"
 import { useToast } from "../ui/Toast"
@@ -50,8 +50,8 @@ export function RoutingPage() {
                 {routes.map((r) => (
                   <div key={r.id} className="flex items-center gap-3 px-5 py-3">
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">{r.provider_name}</div>
-                      <div className="font-mono text-xs text-muted truncate">{r.model_id}</div>
+                      <div className="text-sm font-medium truncate">{r.label || r.model_id}</div>
+                      <div className="font-mono text-xs text-muted truncate">{r.provider_name} / {r.model_id}</div>
                     </div>
                     <span className="chip chip-muted">w={r.weight}</span>
                     <ToggleBtn id={r.id} enabled={r.enabled} />
@@ -118,18 +118,34 @@ function NewRouteDialog({
   models: any[]
   providers: any[]
 }) {
-  const [tier, setTier] = useState(initialTier)
-  const [modelId, setModelId] = useState(models[0]?.id ?? "")
+  const enabledModels = models.filter((m) => m.enabled)
+  const [selectedTiers, setSelectedTiers] = useState<string[]>([initialTier])
+  const [modelId, setModelId] = useState("")
   const [weight, setWeight] = useState("1")
+  const [enabled, setEnabled] = useState(true)
   const qc = useQueryClient()
   const toast = useToast()
-  const enabledModels = models.filter((m) => m.enabled)
+
+  useEffect(() => {
+    if (open) {
+      setSelectedTiers([initialTier])
+      if (enabledModels.length > 0 && !modelId) {
+        setModelId(enabledModels[0].id)
+      }
+    }
+  }, [open, initialTier, enabledModels])
+
+  const toggleTierSelection = (t: string) => {
+    setSelectedTiers((prev) =>
+      prev.includes(t) ? prev.filter((item) => item !== t) : [...prev, t]
+    )
+  }
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title="Add route"
+      title="Add Route"
       footer={
         <>
           <button className="btn" onClick={onClose}>Cancel</button>
@@ -137,13 +153,13 @@ function NewRouteDialog({
             className="btn-primary"
             form="route-form"
             type="submit"
-            disabled={!modelId}
+            disabled={!modelId || selectedTiers.length === 0}
             onClick={async (e) => {
               e.preventDefault()
               try {
-                await createRoute({ tier, model_id: modelId, weight: Number(weight) })
+                await createRoute({ tiers: selectedTiers, model_id: modelId, weight: Number(weight), enabled })
                 qc.invalidateQueries({ queryKey: ["routes"] })
-                toast("success", "Route added")
+                toast("success", "Route(s) added successfully")
                 onClose()
               } catch (e: any) {
                 toast("error", e?.message ?? "Save failed")
@@ -151,35 +167,77 @@ function NewRouteDialog({
             }}
           >
             <ArrowRight className="size-4" />
-            Add route
+            Create Route
           </button>
         </>
       }
     >
       <form id="route-form" className="grid grid-cols-2 gap-4">
-        <label className="flex flex-col gap-1 col-span-2 sm:col-span-1">
-          <span className="label">Tier</span>
-          <select className="input" value={tier} onChange={(e) => setTier(e.target.value as any)}>
-            {TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 col-span-2 sm:col-span-1">
-          <span className="label">Weight</span>
-          <input className="input" type="number" min={0} step="0.1" value={weight} onChange={(e) => setWeight(e.target.value)} />
-        </label>
         <label className="flex flex-col gap-1 col-span-2">
           <span className="label">Model</span>
-          <select className="input" value={modelId} onChange={(e) => setModelId(e.target.value)}>
-            {enabledModels.length === 0 && <option value="">No enabled models</option>}
+          <select className="input font-medium" value={modelId} onChange={(e) => setModelId(e.target.value)}>
+            {enabledModels.length === 0 && <option value="">Select model ▼</option>}
             {enabledModels.map((m) => (
               <option key={m.id} value={m.id}>
-                {m.provider_name}/{m.model_id}
+                {m.label ? `${m.label} (${m.provider_name}/${m.model_id})` : `${m.provider_name}/${m.model_id}`}
               </option>
             ))}
           </select>
           <span className="text-xs text-muted">
-            Routes inherit pricing from the model registry. New route weight applies on the next request.
+            Select an active model configured in the Models registry.
           </span>
+        </label>
+
+        <div className="flex flex-col gap-2 col-span-2">
+          <span className="label">Tiers</span>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {TIERS.map((t) => (
+              <label
+                key={t}
+                className={clsx(
+                  "flex items-center gap-2 p-2.5 rounded-md border cursor-pointer text-sm font-medium transition-colors",
+                  selectedTiers.includes(t)
+                    ? "border-accent bg-accent/10 text-primary"
+                    : "border-line bg-surface text-muted hover:border-line-hover"
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedTiers.includes(t)}
+                  onChange={() => toggleTierSelection(t)}
+                  className="rounded border-line"
+                />
+                <span className="capitalize">{t}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <label className="flex flex-col gap-1 col-span-2 sm:col-span-1">
+          <span className="label">Priority / Weight</span>
+          <input
+            className="input"
+            type="number"
+            min={0}
+            step="0.1"
+            value={weight}
+            onChange={(e) => setWeight(e.target.value)}
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 col-span-2 sm:col-span-1 justify-end">
+          <div className="flex items-center gap-2 py-2.5">
+            <input
+              type="checkbox"
+              id="route-enabled"
+              checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)}
+              className="rounded border-line"
+            />
+            <label htmlFor="route-enabled" className="text-sm font-medium cursor-pointer">
+              Enabled
+            </label>
+          </div>
         </label>
       </form>
     </Modal>

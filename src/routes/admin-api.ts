@@ -4,6 +4,7 @@ import { sql, withDbResilience } from "../lib/db"
 import { requireAdmin } from "../middleware/session-auth"
 import { audit, actorEmailFor } from "../lib/audit"
 import { fetchOpenRouterModelMetadata } from "../lib/openrouter"
+import { getUserSpending, monthStart } from "../lib/quota"
 
 
 export const adminApi = new Hono()
@@ -124,7 +125,7 @@ adminApi.get("/dashboard/overview", async (c) => {
 adminApi.get("/dashboard/providers/health", async (c) => {
   try {
     const rows = await sql`
-      SELECT id, name, base_url, provider_type, enabled, healthy, consecutive_failures, last_failure_at
+      SELECT id, name, base_url, provider_type, enabled, healthy, health_state, consecutive_failures, last_failure_at, cooldown_until, last_failure_reason, last_success_at
         FROM providers ORDER BY name
     `
     return c.json({ providers: rows })
@@ -151,6 +152,7 @@ adminApi.get("/users", async (c) => {
     const rows = await sql`
       SELECT u.id, u.email, u.role, u.created_at,
              s.tier, s.status AS subscription_status, s.token_budget_monthly,
+             s.spending_cap_usd, s.spending_cap_enabled, s.spending_cap_period,
              COALESCE((SELECT count(*) FROM api_keys WHERE user_id = u.id AND revoked = false), 0) AS active_keys,
              COALESCE((SELECT count(*) FROM ai_requests WHERE user_id = u.id), 0) AS total_requests,
              COALESCE((SELECT sum(cost_usd) FROM ai_requests WHERE user_id = u.id), 0) AS total_cost
@@ -162,9 +164,38 @@ adminApi.get("/users", async (c) => {
     `
     const lastLogin = await sql`SELECT user_id, max(last_used_at) AS last_used_at FROM api_keys GROUP BY user_id`
     const lastMap = new Map(lastLogin.map((r: any) => [r.user_id, r.last_used_at]))
-    return c.json({
-      users: rows.map((r: any) => ({ ...r, last_login_at: lastMap.get(r.id) ?? null })),
+
+    const monthlyCosts = await sql`
+      SELECT user_id, COALESCE(sum(total_cost_usd), 0) AS month_cost
+      FROM monthly_usage
+      WHERE month = ${monthStart()}
+      GROUP BY user_id
+    `
+    const monthCostMap = new Map(monthlyCosts.map((r: any) => [r.user_id, Number(r.month_cost)]))
+
+    const users = rows.map((r: any) => {
+      const capEnabled = Boolean(r.spending_cap_enabled)
+      const capUsd = r.spending_cap_usd != null ? Number(Number(r.spending_cap_usd).toFixed(4)) : null
+      const currentUsageUsd = Number((monthCostMap.get(r.id) ?? 0).toFixed(4))
+      let remainingUsd: number | null = null
+      let limitStatus = "unlimited"
+      if (capEnabled && capUsd !== null) {
+        remainingUsd = Math.max(0, Number((capUsd - currentUsageUsd).toFixed(4)))
+        limitStatus = currentUsageUsd >= capUsd ? "limit_reached" : "within_limit"
+      }
+      return {
+        ...r,
+        last_login_at: lastMap.get(r.id) ?? null,
+        spending_cap_usd: capUsd,
+        spending_cap_enabled: capEnabled,
+        spending_cap_period: r.spending_cap_period ?? "monthly",
+        current_usage_usd: currentUsageUsd,
+        remaining_cap_usd: remainingUsd,
+        limit_status: limitStatus,
+      }
     })
+
+    return c.json({ users })
   } catch (err) {
     return jsonError(c, 500, "users_list_failed", err instanceof Error ? err.message : String(err))
   }
@@ -176,6 +207,9 @@ const userCreateSchema = z.object({
   role: z.enum(["user", "admin"]).default("user"),
   tier: z.enum(["free", "pro", "enterprise"]).default("free"),
   token_budget_monthly: z.coerce.number().int().min(0).default(50000),
+  spending_cap_usd: z.coerce.number().min(0).optional().nullable(),
+  spending_cap_enabled: z.boolean().default(false),
+  spending_cap_period: z.enum(["monthly"]).default("monthly"),
 })
 
 adminApi.post("/users", async (c) => {
@@ -183,7 +217,7 @@ adminApi.post("/users", async (c) => {
   const body = await c.req.json().catch(() => null)
   const parsed = userCreateSchema.safeParse(body)
   if (!parsed.success) return jsonError(c, 400, "invalid_payload", JSON.stringify(parsed.error.flatten()))
-  const { email, password, role, tier, token_budget_monthly } = parsed.data
+  const { email, password, role, tier, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period } = parsed.data
   try {
     const existing = await sql`SELECT id FROM users WHERE email = ${email}`
     if (existing.length > 0) return jsonError(c, 409, "email_taken")
@@ -192,10 +226,16 @@ adminApi.post("/users", async (c) => {
     const [u] = await sql`
       INSERT INTO users (email, password_hash, role) VALUES (${email}, ${hash}, ${role}) RETURNING id
     `
+    const cap = spending_cap_usd !== undefined ? spending_cap_usd : null
     await sql`
-      INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly)
-      VALUES (${u.id}, ${tier}, 'active', ${token_budget_monthly})
-      ON CONFLICT (user_id) DO UPDATE SET tier=${tier}, token_budget_monthly=${token_budget_monthly}
+      INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period)
+      VALUES (${u.id}, ${tier}, 'active', ${token_budget_monthly}, ${cap}, ${spending_cap_enabled}, ${spending_cap_period})
+      ON CONFLICT (user_id) DO UPDATE SET
+        tier=${tier},
+        token_budget_monthly=${token_budget_monthly},
+        spending_cap_usd=${cap},
+        spending_cap_enabled=${spending_cap_enabled},
+        spending_cap_period=${spending_cap_period}
     `
     await audit({
       actorId: session.userId,
@@ -204,7 +244,7 @@ adminApi.post("/users", async (c) => {
       resource: "user",
       resourceId: u.id,
       ip: ip(c),
-      metadata: { email, role, tier },
+      metadata: { email, role, tier, spending_cap_usd: cap, spending_cap_enabled },
     })
     return c.json({ id: u.id, email, role, tier })
   } catch (err) {
@@ -217,6 +257,9 @@ const userUpdateSchema = z.object({
   tier: z.enum(["free", "pro", "enterprise"]).optional(),
   status: z.enum(["active", "suspended"]).optional(),
   token_budget_monthly: z.coerce.number().int().min(0).optional(),
+  spending_cap_usd: z.coerce.number().min(0).optional().nullable(),
+  spending_cap_enabled: z.boolean().optional(),
+  spending_cap_period: z.enum(["monthly"]).optional(),
 })
 
 adminApi.patch("/users/:id", async (c) => {
@@ -229,17 +272,27 @@ adminApi.patch("/users/:id", async (c) => {
     const existing = await sql`SELECT id FROM users WHERE id = ${id}`
     if (existing.length === 0) return jsonError(c, 404, "not_found")
     if (parsed.data.role) await sql`UPDATE users SET role = ${parsed.data.role} WHERE id = ${id}`
-    if (parsed.data.tier || parsed.data.status || parsed.data.token_budget_monthly !== undefined) {
+    if (
+      parsed.data.tier || parsed.data.status || parsed.data.token_budget_monthly !== undefined ||
+      parsed.data.spending_cap_usd !== undefined || parsed.data.spending_cap_enabled !== undefined || parsed.data.spending_cap_period !== undefined
+    ) {
       const tier = parsed.data.tier ?? null
       const status = parsed.data.status ?? null
       const budget = parsed.data.token_budget_monthly ?? null
+      const capUsd = parsed.data.spending_cap_usd !== undefined ? parsed.data.spending_cap_usd : null
+      const capEnabled = parsed.data.spending_cap_enabled !== undefined ? parsed.data.spending_cap_enabled : null
+      const capPeriod = parsed.data.spending_cap_period ?? null
+
       await sql`
-        INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly)
-        VALUES (${id}, ${parsed.data.tier ?? "free"}, ${parsed.data.status ?? "active"}, ${parsed.data.token_budget_monthly ?? 50000})
+        INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period)
+        VALUES (${id}, ${parsed.data.tier ?? "free"}, ${parsed.data.status ?? "active"}, ${parsed.data.token_budget_monthly ?? 50000}, ${capUsd}, ${parsed.data.spending_cap_enabled ?? false}, ${parsed.data.spending_cap_period ?? "monthly"})
         ON CONFLICT (user_id) DO UPDATE SET
           tier = COALESCE(${tier}::text, subscriptions.tier),
           status = COALESCE(${status}::text, subscriptions.status),
-          token_budget_monthly = COALESCE(${budget}::bigint, subscriptions.token_budget_monthly)
+          token_budget_monthly = COALESCE(${budget}::bigint, subscriptions.token_budget_monthly),
+          spending_cap_usd = CASE WHEN ${parsed.data.spending_cap_usd !== undefined} THEN ${capUsd}::numeric ELSE subscriptions.spending_cap_usd END,
+          spending_cap_enabled = CASE WHEN ${parsed.data.spending_cap_enabled !== undefined} THEN ${capEnabled}::boolean ELSE subscriptions.spending_cap_enabled END,
+          spending_cap_period = COALESCE(${capPeriod}::text, subscriptions.spending_cap_period)
       `
     }
     await audit({
@@ -279,12 +332,15 @@ adminApi.delete("/users/:id", async (c) => {
 
 adminApi.get("/users/:id", async (c) => {
   try {
+    const id = c.req.param("id")
     const [u] = await sql`
       SELECT u.id, u.email, u.role, u.created_at,
-             s.tier, s.status, s.token_budget_monthly
-        FROM users u LEFT JOIN subscriptions s ON s.user_id = u.id WHERE u.id = ${c.req.param("id")}
+             s.tier, s.status, s.token_budget_monthly,
+             s.spending_cap_usd, s.spending_cap_enabled, s.spending_cap_period
+        FROM users u LEFT JOIN subscriptions s ON s.user_id = u.id WHERE u.id = ${id}
     `
     if (!u) return jsonError(c, 404, "not_found")
+    const spending = await getUserSpending(id)
     const [usage] = await sql`
       SELECT COALESCE(sum(input_tokens + output_tokens), 0) AS tokens,
              COALESCE(sum(cost_usd), 0) AS cost,
@@ -295,7 +351,7 @@ adminApi.get("/users/:id", async (c) => {
       SELECT id, key_prefix, label, created_at, last_used_at, revoked
         FROM api_keys WHERE user_id = ${u.id} ORDER BY created_at DESC
     `
-    return c.json({ user: u, usage, keys })
+    return c.json({ user: { ...u, ...spending }, usage, keys })
   } catch (err) {
     return jsonError(c, 500, "user_get_failed", err instanceof Error ? err.message : String(err))
   }
@@ -308,7 +364,7 @@ adminApi.get("/users/:id", async (c) => {
 adminApi.get("/providers", async (c) => {
   try {
     const rows = await sql`
-      SELECT id, name, base_url, provider_type, enabled, healthy, consecutive_failures, last_failure_at, created_at
+      SELECT id, name, base_url, provider_type, enabled, healthy, health_state, consecutive_failures, last_failure_at, cooldown_until, last_failure_reason, last_success_at, created_at
         FROM providers ORDER BY created_at DESC
     `
     const masked = (await sql`SELECT id, length(api_key) AS key_length FROM providers`).reduce(
@@ -509,6 +565,34 @@ adminApi.post("/providers/:id/test", async (c) => {
     return c.json({ ok, status: res.status, latency_ms: latency })
   } catch (err) {
     return jsonError(c, 500, "provider_test_failed", err instanceof Error ? err.message : String(err))
+  }
+})
+
+adminApi.post("/providers/:id/reset-health", async (c) => {
+  const session = c.var.session
+  const id = c.req.param("id")
+  try {
+    await sql`
+      UPDATE providers
+      SET healthy = true,
+          health_state = 'HEALTHY',
+          consecutive_failures = 0,
+          cooldown_until = NULL,
+          last_failure_reason = NULL,
+          last_success_at = now()
+      WHERE id = ${id}
+    `
+    await audit({
+      actorId: session.userId,
+      actorEmail: await actorEmailFor(session.userId),
+      action: "provider.reset_health",
+      resource: "provider",
+      resourceId: id,
+      ip: ip(c),
+    })
+    return c.json({ ok: true })
+  } catch (err) {
+    return jsonError(c, 500, "provider_reset_health_failed", err instanceof Error ? err.message : String(err))
   }
 })
 
@@ -952,9 +1036,11 @@ adminApi.get("/routing", async (c) => {
 })
 
 const routeCreateSchema = z.object({
-  tier: z.enum(["trivial", "simple", "medium", "complex"]),
+  tier: z.enum(["trivial", "simple", "medium", "complex"]).optional(),
+  tiers: z.array(z.enum(["trivial", "simple", "medium", "complex"])).optional(),
   model_id: z.string().uuid(),
   weight: z.coerce.number().min(0).default(1),
+  enabled: z.boolean().default(true),
 })
 
 adminApi.post("/routing", async (c) => {
@@ -963,22 +1049,33 @@ adminApi.post("/routing", async (c) => {
   const parsed = routeCreateSchema.safeParse(body)
   if (!parsed.success) return jsonError(c, 400, "invalid_payload")
   const d = parsed.data
+
+  const targetTiers = d.tiers && d.tiers.length > 0 ? d.tiers : (d.tier ? [d.tier] : [])
+  if (targetTiers.length === 0) {
+    return jsonError(c, 400, "invalid_payload", "At least one tier is required")
+  }
+
   try {
-    const [r] = await sql`
-      INSERT INTO tier_routes (tier, model_id, weight) VALUES (${d.tier}, ${d.model_id}, ${d.weight})
-      ON CONFLICT (tier, model_id) DO UPDATE SET weight = ${d.weight}
-      RETURNING id
-    `
+    const createdIds: string[] = []
+    for (const t of targetTiers) {
+      const [r] = await sql`
+        INSERT INTO tier_routes (tier, model_id, weight, enabled)
+        VALUES (${t}, ${d.model_id}, ${d.weight}, ${d.enabled})
+        ON CONFLICT (tier, model_id) DO UPDATE SET weight = ${d.weight}, enabled = ${d.enabled}
+        RETURNING id
+      `
+      createdIds.push(r.id)
+    }
     await audit({
       actorId: session.userId,
       actorEmail: await actorEmailFor(session.userId),
       action: "route.create",
       resource: "routing",
-      resourceId: r.id,
+      resourceId: createdIds[0],
       ip: ip(c),
-      metadata: { tier: d.tier, model_id: d.model_id },
+      metadata: { tiers: targetTiers, model_id: d.model_id },
     })
-    return c.json({ id: r.id })
+    return c.json({ ok: true, ids: createdIds, id: createdIds[0] })
   } catch (err) {
     return jsonError(c, 500, "routing_create_failed", err instanceof Error ? err.message : String(err))
   }

@@ -176,16 +176,18 @@ async function recordRequest(fields: {
   status: "success" | "failure" | "rejected"
   rejectReason?: string
   fromCache?: boolean
+  requestId?: string
 }) {
   try {
     await withDbResilience(() => sql`
       INSERT INTO ai_requests (
         user_id, ip, model_label, prompt_hash, input_tokens, output_tokens,
-        cost_usd, latency_ms, status, reject_reason, from_cache
+        cost_usd, latency_ms, status, reject_reason, from_cache, request_id
       ) VALUES (
         ${fields.userId}, ${fields.ip}, ${fields.modelLabel}, ${fields.promptHash ?? null},
         ${fields.inputTokens ?? 0}, ${fields.outputTokens ?? 0}, ${fields.costUsd ?? 0},
-        ${fields.latencyMs ?? null}, ${fields.status}, ${fields.rejectReason ?? null}, ${fields.fromCache ?? false}
+        ${fields.latencyMs ?? null}, ${fields.status}, ${fields.rejectReason ?? null}, ${fields.fromCache ?? false},
+        ${fields.requestId ?? null}
       )
     `)
   } catch (err) {
@@ -213,6 +215,7 @@ gateway.get("/models", requireApiKey(), async (c) => {
 
 gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async (c) => {
   const user = c.var.apiUser
+  const reqId = c.get("requestId") ?? c.req.header("x-request-id") ?? `req-${Date.now()}`
   const ip =
     c.req.header("cf-connecting-ip") ??
     c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
@@ -228,17 +231,25 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
 
   const quota = await checkQuota(user.id)
   if (!quota.allowed) {
-    bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: quota.reason }))
-    const statusCode = quota.reason === "quota_exceeded" ? 402 : quota.reason === "suspended" ? 403 : 401
-    const message = quota.reason === "quota_exceeded" ? "Your account ran out of credits." :
-                    quota.reason === "suspended" ? "Your account is suspended — contact support." :
-                    "Your account is not authorized."
-    
+    bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: quota.reason, requestId: reqId }))
+    let statusCode = 401
+    let message = "Your account is not authorized."
+    if (quota.reason === "USAGE_LIMIT_REACHED") {
+      statusCode = 402
+      message = "Your spending limit has been reached. Please contact an administrator."
+    } else if (quota.reason === "quota_exceeded") {
+      statusCode = 402
+      message = "Your account ran out of credits."
+    } else if (quota.reason === "suspended") {
+      statusCode = 403
+      message = "Your account is suspended — contact support."
+    }
+
     const errorBody = {
-      error: quota.reason.toUpperCase(),
+      error: (quota.reason ?? "UNAUTHORIZED").toUpperCase(),
       message: message
     }
-    
+
     if (stream) {
       const sseBody = `data: ${JSON.stringify(errorBody)}\n\ndata: [DONE]\n\n`
       return new Response(sseBody, {
@@ -246,7 +257,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
         headers: SSE_HEADERS,
       })
     }
-    return c.json(errorBody, statusCode)
+    return c.json(errorBody, statusCode as any)
   }
 
   const complexity = classifyComplexity(messages as any)
@@ -409,8 +420,8 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             err,
           )
           lastErr = err
-          bg(reportRouteOutcome(target.providerId, false))
-          bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(err) }))
+          bg(reportRouteOutcome(target.providerId, { success: false, error: err }))
+          bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(err), requestId: reqId }))
           if (classification.action === "break_loop") {
             breakLoopErr = err
             break
@@ -421,7 +432,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       }
     } catch (err) {
       if (err instanceof ContextWindowExceededError) {
-        bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `context_window_exceeded: required=${err.requiredTokens}, largest=${err.largestAvailable}` }))
+        bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `context_window_exceeded: required=${err.requiredTokens}, largest=${err.largestAvailable}`, requestId: reqId }))
         return c.json({
           error: "context_window_exceeded",
           message: err.message,
@@ -432,7 +443,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       }
       if (err instanceof UnsupportedCapabilityError) {
         const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
-        bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}` }))
+        bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}`, requestId: reqId }))
         return c.json({
           error: errCode,
           message: err.message,
@@ -443,16 +454,10 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       throw err
     }
 
-    // If the loop exited because the last attempt hit a break_loop error
-    // (the request itself is invalid), surface it to the client with a
-    // clear message and the provider's status code (or a synthesized 400).
-    // skip_candidate errors do NOT exit the loop — those loop bodies
-    // already `continue` to the next model, and we only land here after
-    // all candidates have been tried.
     if (breakLoopErr) {
       const classification = classifyProviderError(breakLoopErr)
       const status = breakLoopStatus(classification)
-      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `non_retryable: ${failureReason(breakLoopErr)}` }))
+      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `non_retryable: ${failureReason(breakLoopErr)}`, requestId: reqId }))
       const readableMessage = classification.kind === "content_policy_violation" ? "Your request was rejected for violating safety policies." :
                               classification.kind === "unsupported_parameter" ? "Your request contained an unsupported parameter or feature." :
                               classification.kind === "context_length_exceeded" ? "Your request is too long for this model." :
@@ -465,13 +470,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       }, status as 400)
     }
 
-    bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "all_fallback_attempts_failed" }))
-    // Surface the last error's classification in the response so the
-    // client knows whether to retry (rate limit / busy), fix their
-    // input (context window / bad request), or fix their config
-    // (unauthorized — usually means a provider key is missing or
-    // rejected by the upstream). Without this, every failure looks
-    // the same in the dashboard.
+    bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "all_fallback_attempts_failed", requestId: reqId }))
     const lastClassification = lastErr ? classifyProviderError(lastErr) : null
     const hint = lastClassification
       ? hintForClassification(lastClassification)
@@ -511,21 +510,16 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           extras,
           startResult.error,
         )
-        // If the provider rejected a message in the conversation, log safe
-        // per-message diagnostics so we can correlate the index to the
-        // normalizer's output. Never logs content.
         if (classification.action === "break_loop" && classification.kind === "bad_request") {
           logMessageDiagnostics(messages as any[], "incoming_request")
         }
         lastErr = startResult.error
-        bg(reportRouteOutcome(target.providerId, false))
-        bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(startResult.error) }))
+        bg(reportRouteOutcome(target.providerId, { success: false, error: startResult.error }))
+        bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(startResult.error), requestId: reqId }))
         if (classification.action === "break_loop") {
           breakLoopErr = startResult.error
           break
         }
-        // continue or skip_candidate: client has seen NOTHING from this
-        // attempt, so it's safe to try the next model.
         continue
       }
 
@@ -550,12 +544,10 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           await recordRequest({
             userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
             inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
-            latencyMs, status: "success",
+            latencyMs, status: "success", requestId: reqId,
           })
           await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
         } catch (err) {
-          // Mid-stream failure AFTER commit — cannot fall back at this point,
-          // the client already has partial output from this model. Just log it.
           const classification = classifyProviderError(err)
           const rejectReason = (err as UpstreamTimeoutError)?.rejectReason
           console.error(
@@ -566,8 +558,8 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             ` stage=mid_stream`,
             err,
           )
-          await reportRouteOutcome(target.providerId, false)
-          await recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: "mid_stream_failure: " + failureReason(err) })
+          await reportRouteOutcome(target.providerId, { success: false, error: err })
+          await recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: "mid_stream_failure: " + failureReason(err), requestId: reqId })
         }
       })())
 

@@ -1,13 +1,14 @@
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Plus, Trash2 } from "lucide-react"
-import { createUser, deleteUser, listUsers, updateUser } from "../api"
+import { DollarSign, Edit3, Plus, Trash2 } from "lucide-react"
+import { createUser, deleteUser, listUsers, updateUser, type User } from "../api"
 import { Modal } from "../ui/Modal"
 import { useToast } from "../ui/Toast"
 
 export function UsersPage() {
   const q = useQuery({ queryKey: ["users"], queryFn: listUsers })
   const [open, setOpen] = useState(false)
+  const [capUser, setCapUser] = useState<User | null>(null)
   const users = q.data?.users ?? []
   const admins = users.filter((u: any) => u.role === "admin").length
   const suspended = users.filter((u: any) => u.subscription_status === "suspended").length
@@ -19,7 +20,7 @@ export function UsersPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Users</h1>
           <p className="text-muted text-sm mt-1 max-w-xl">
-            Manage tenant accounts, tier, status, and monthly quotas.
+            Manage tenant accounts, tier, status, monthly quotas, and spending limits.
           </p>
         </div>
         <button className="btn-primary" onClick={() => setOpen(true)}>
@@ -42,15 +43,15 @@ export function UsersPage() {
               <th>Role</th>
               <th>Tier</th>
               <th>Status</th>
-              <th className="text-right">API keys</th>
-              <th className="text-right">Usage</th>
+              <th className="text-right">Spending Limit / Usage</th>
+              <th className="text-center">Limit Status</th>
               <th>Last login</th>
               <th className="text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {users.map((u: any) => (
-              <UserRow key={u.id} u={u} />
+            {users.map((u: User) => (
+              <UserRow key={u.id} u={u} onEditCap={(user) => setCapUser(user)} />
             ))}
             {users.length === 0 && !q.isLoading && (
               <tr>
@@ -60,7 +61,11 @@ export function UsersPage() {
           </tbody>
         </table>
       </div>
+
       <NewUserDialog open={open} onClose={() => setOpen(false)} />
+      {capUser && (
+        <EditSpendingCapDialog user={capUser} open={!!capUser} onClose={() => setCapUser(null)} />
+      )}
     </div>
   )
 }
@@ -76,7 +81,7 @@ function Stat({ label, value, accent }: { label: string; value: number | string;
   )
 }
 
-function UserRow({ u }: { u: any }) {
+function UserRow({ u, onEditCap }: { u: User; onEditCap: (u: User) => void }) {
   const qc = useQueryClient()
   const [tier, setTier] = useState(u.tier ?? "free")
   const [status, setStatus] = useState(u.subscription_status ?? "active")
@@ -88,6 +93,12 @@ function UserRow({ u }: { u: any }) {
     mutationFn: () => deleteUser(u.id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["users"] }),
   })
+
+  const currentUsage = u.current_usage_usd ?? Number(Number(u.total_cost ?? 0).toFixed(4))
+  const capUsd = u.spending_cap_usd
+  const capEnabled = Boolean(u.spending_cap_enabled)
+  const remaining = u.remaining_cap_usd
+
   return (
     <tr>
       <td>
@@ -117,22 +128,147 @@ function UserRow({ u }: { u: any }) {
           {["active", "suspended"].map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </td>
-      <td className="text-right font-mono text-xs">{u.active_keys}</td>
       <td className="text-right font-mono text-xs">
-        {Number(u.total_requests).toLocaleString()} req<br />
-        <span className="text-muted">${Number(u.total_cost).toFixed(4)}</span>
+        {capEnabled && capUsd !== null ? (
+          <>
+            <div className="font-semibold">${currentUsage.toFixed(2)} / ${capUsd.toFixed(2)}</div>
+            <div className="text-muted">Remaining: ${remaining != null ? remaining.toFixed(2) : "0.00"}</div>
+          </>
+        ) : (
+          <>
+            <div>${currentUsage.toFixed(2)} / ∞</div>
+            <div className="text-muted">Unlimited</div>
+          </>
+        )}
+      </td>
+      <td className="text-center">
+        {capEnabled && capUsd !== null ? (
+          u.limit_status === "limit_reached" ? (
+            <span className="chip chip-bad">Limit reached</span>
+          ) : (
+            <span className="chip chip-good">Within limit</span>
+          )
+        ) : (
+          <span className="chip chip-muted">No cap</span>
+        )}
       </td>
       <td className="text-xs">{u.last_login_at ? new Date(u.last_login_at).toLocaleString() : <span className="text-muted">never</span>}</td>
       <td className="text-right">
-        <button
-          className="btn-ghost text-bad"
-          onClick={() => confirm(`Delete user ${u.email}?`) && del.mutate()}
-          title="Delete user"
-        >
-          <Trash2 className="size-4" />
-        </button>
+        <div className="flex items-center justify-end gap-1">
+          <button
+            className="btn-ghost"
+            onClick={() => onEditCap(u)}
+            title="Edit Spending Cap"
+          >
+            <DollarSign className="size-4" />
+          </button>
+          <button
+            className="btn-ghost text-bad"
+            onClick={() => confirm(`Delete user ${u.email}?`) && del.mutate()}
+            title="Delete user"
+          >
+            <Trash2 className="size-4" />
+          </button>
+        </div>
       </td>
     </tr>
+  )
+}
+
+function EditSpendingCapDialog({ user, open, onClose }: { user: User; open: boolean; onClose: () => void }) {
+  const [capUsd, setCapUsd] = useState(user.spending_cap_usd != null ? String(user.spending_cap_usd) : "5.00")
+  const [enabled, setEnabled] = useState(user.spending_cap_enabled ?? true)
+  const [period, setPeriod] = useState(user.spending_cap_period ?? "monthly")
+
+  const qc = useQueryClient()
+  const toast = useToast()
+  const mut = useMutation({
+    mutationFn: (body: any) => updateUser(user.id, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["users"] })
+      toast("success", "Spending cap updated")
+      onClose()
+    },
+    onError: (err: any) => {
+      toast("error", err?.message ?? "Update failed")
+    },
+  })
+
+  const currentUsage = user.current_usage_usd ?? 0
+  const capVal = Number(capUsd) || 0
+  const remaining = enabled ? Math.max(0, capVal - currentUsage) : null
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`Spending limit · ${user.email}`}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button
+            className="btn-primary"
+            onClick={() => {
+              mut.mutate({
+                spending_cap_usd: enabled ? Number(capUsd) : null,
+                spending_cap_enabled: enabled,
+                spending_cap_period: period,
+              })
+            }}
+            disabled={mut.isPending}
+          >
+            Save
+          </button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+            className="rounded border-line"
+          />
+          <span>Cap Enabled</span>
+        </label>
+
+        {enabled && (
+          <div className="grid grid-cols-2 gap-4">
+            <label className="flex flex-col gap-1">
+              <span className="label">Spending limit ($)</span>
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                className="input"
+                value={capUsd}
+                onChange={(e) => setCapUsd(e.target.value)}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="label">Cap Period</span>
+              <select className="input" value={period} onChange={(e) => setPeriod(e.target.value)}>
+                <option value="monthly">Monthly</option>
+              </select>
+            </label>
+          </div>
+        )}
+
+        <div className="p-3 rounded-md bg-surface border border-line flex justify-between text-xs">
+          <div>
+            <span className="text-muted">Current usage:</span>{" "}
+            <span className="font-mono font-semibold">${currentUsage.toFixed(2)}</span>
+          </div>
+          <div>
+            <span className="text-muted">Remaining:</span>{" "}
+            <span className="font-mono font-semibold">
+              {remaining !== null ? `$${remaining.toFixed(2)}` : "Unlimited"}
+            </span>
+          </div>
+        </div>
+      </div>
+    </Modal>
   )
 }
 
@@ -142,6 +278,8 @@ function NewUserDialog({ open, onClose }: { open: boolean; onClose: () => void }
   const [role, setRole] = useState<"user" | "admin">("user")
   const [tier, setTier] = useState<"free" | "pro" | "enterprise">("free")
   const [budget, setBudget] = useState(50000)
+  const [spendingCap, setSpendingCap] = useState("5.00")
+  const [spendingCapEnabled, setSpendingCapEnabled] = useState(false)
   const qc = useQueryClient()
   const toast = useToast()
   return (
@@ -156,7 +294,12 @@ function NewUserDialog({ open, onClose }: { open: boolean; onClose: () => void }
             className="btn-primary"
             onClick={async () => {
               try {
-                await createUser({ email, password, role, tier, token_budget_monthly: budget })
+                await createUser({
+                  email, password, role, tier, token_budget_monthly: budget,
+                  spending_cap_usd: spendingCapEnabled ? Number(spendingCap) : null,
+                  spending_cap_enabled: spendingCapEnabled,
+                  spending_cap_period: "monthly",
+                })
                 qc.invalidateQueries({ queryKey: ["users"] })
                 toast("success", "User created")
                 onClose()
@@ -199,6 +342,30 @@ function NewUserDialog({ open, onClose }: { open: boolean; onClose: () => void }
           <span className="label">Monthly token budget</span>
           <input type="number" min={0} className="input" value={budget} onChange={(e) => setBudget(Number(e.target.value))} />
         </label>
+        <div className="flex flex-col gap-2 md:col-span-2 pt-2 border-t border-line">
+          <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+            <input
+              type="checkbox"
+              checked={spendingCapEnabled}
+              onChange={(e) => setSpendingCapEnabled(e.target.checked)}
+              className="rounded border-line"
+            />
+            <span>Enable Spending Cap</span>
+          </label>
+          {spendingCapEnabled && (
+            <label className="flex flex-col gap-1">
+              <span className="label">Spending limit ($)</span>
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                className="input"
+                value={spendingCap}
+                onChange={(e) => setSpendingCap(e.target.value)}
+              />
+            </label>
+          )}
+        </div>
       </div>
     </Modal>
   )
