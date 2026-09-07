@@ -5,6 +5,125 @@ import type { RouteTarget } from "./routing"
 import { normalizeMessages } from "./message-normalizer"
 import { env } from "./env"
 import { SSE_HEADERS } from "./sse-headers"
+import { log } from "./logger"
+
+/** Set PROVIDER_REQUEST_DEBUG=1 to log safe outbound provider request metadata
+ * (URL, endpoint type, model, auth mode). Never logs API keys or Authorization. */
+const PROVIDER_REQUEST_DEBUG = process.env.PROVIDER_REQUEST_DEBUG === "1"
+
+export type AzureEndpointKind = "none" | "azure-classic" | "azure-v1"
+
+/** Classify an OpenAI-compatible base URL as Azure classic, Azure/Foundry v1, or neither. */
+export function classifyAzureEndpoint(baseUrl: string): AzureEndpointKind {
+  const lower = baseUrl.toLowerCase()
+  const isAzure =
+    lower.includes("openai.azure.com") || lower.includes("services.ai.azure.com")
+  if (!isAzure) return "none"
+  if (lower.includes("/openai/v1")) return "azure-v1"
+  return "azure-classic"
+}
+
+/**
+ * Resolve the baseURL passed to createOpenAICompatible for a RouteTarget.
+ * Exported so unit tests can assert Azure v1 vs classic rewriting without
+ * spinning up streamText/generateText.
+ *
+ * - Azure v1 (path contains /openai/v1): leave path as-is; never add
+ *   /deployments/{model} or api-version.
+ * - Foundry root (*.services.ai.azure.com without /openai/...): append
+ *   /openai/v1.
+ * - Azure classic: rewrite to /openai/deployments/{modelId}?api-version=...
+ * - Other OpenAI-compatible: strip a trailing /chat/completions if present.
+ */
+export function resolveOpenAICompatibleBaseUrl(target: RouteTarget): {
+  baseUrl: string
+  azureKind: AzureEndpointKind
+} {
+  let baseUrl = target.baseUrl
+  if (baseUrl.endsWith("/chat/completions/")) {
+    baseUrl = baseUrl.slice(0, -"/chat/completions/".length)
+  } else if (baseUrl.endsWith("/chat/completions")) {
+    baseUrl = baseUrl.slice(0, -"/chat/completions".length)
+  }
+
+  // Foundry / services.ai host with bare root → normalize to v1.
+  try {
+    const parsed = new URL(baseUrl)
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.replace(/\/+$/, "") || "/"
+    if (host.endsWith("services.ai.azure.com") && (path === "/" || path === "")) {
+      parsed.pathname = "/openai/v1"
+      baseUrl = parsed.toString().replace(/\/$/, "")
+    }
+  } catch {
+    // Invalid URL — leave as-is; createOpenAICompatible will fail loudly.
+  }
+
+  const azureKind = classifyAzureEndpoint(baseUrl)
+
+  if (azureKind === "azure-classic") {
+    const parsedUrl = new URL(baseUrl)
+    if (!parsedUrl.pathname.includes("/openai/deployments/")) {
+      const cleanPath = parsedUrl.pathname.replace(/\/+$/, "")
+      parsedUrl.pathname = `${cleanPath}/openai/deployments/${target.modelId}`
+    }
+    if (!parsedUrl.searchParams.has("api-version")) {
+      parsedUrl.searchParams.set("api-version", "2024-10-21")
+    }
+    baseUrl = parsedUrl.toString()
+  }
+
+  return { baseUrl, azureKind }
+}
+
+/**
+ * Translate an OpenAI Chat Completions request body into a Responses API body.
+ * Azure Foundry v1 models (e.g. gpt-5.1-codex-mini) reject Chat Completions and
+ * require POST /responses with `input` + `max_output_tokens` (not `max_tokens`).
+ */
+export function chatCompletionsBodyToResponses(body: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...body }
+
+  if (out.messages !== undefined && out.input === undefined) {
+    out.input = out.messages
+  }
+  delete out.messages
+
+  if (typeof out.max_tokens === "number" && out.max_output_tokens === undefined) {
+    out.max_output_tokens = out.max_tokens
+  }
+  delete out.max_tokens
+
+  // Chat Completions-only fields that Responses rejects.
+  delete out.n
+  delete out.logprobs
+  delete out.top_logprobs
+  delete out.logit_bias
+  delete out.presence_penalty
+  delete out.frequency_penalty
+  delete out.user
+
+  return out
+}
+
+function logProviderRequestDebug(info: {
+  provider: string
+  endpointType: string
+  url: string
+  model?: string
+  auth: string
+  pathRewrite?: string
+}) {
+  if (!PROVIDER_REQUEST_DEBUG) return
+  log.debug("provider_request_debug", {
+    provider: info.provider,
+    endpoint_type: info.endpointType,
+    url: info.url,
+    model: info.model,
+    auth: info.auth,
+    path_rewrite: info.pathRewrite,
+  })
+}
 
 export interface CallResult {
   content: string
@@ -434,38 +553,132 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
   })
 }
 
+function isAzureV1ChatCompletionsUrl(url: string): boolean {
+  const lower = url.toLowerCase()
+  const isAzureHost =
+    lower.includes("openai.azure.com") || lower.includes("services.ai.azure.com")
+  return isAzureHost && /\/openai\/v1\/chat\/completions\/?(\?|$)/.test(lower)
+}
+
+function shouldRetryChatAsResponses(errMsg: string): boolean {
+  const m = errMsg.toLowerCase()
+  return (
+    m.includes("operation is unsupported") ||
+    m.includes("unsupported parameter") ||
+    m.includes("responses api") ||
+    m.includes("not supported with this model") ||
+    m.includes("use the responses api") ||
+    m.includes("chat completions is not supported") ||
+    m.includes("chat completion is not supported")
+  )
+}
+
+function rewriteInitBodyToResponses(init?: RequestInit): RequestInit {
+  const newInit: RequestInit = { ...(init ?? {}) }
+  if (newInit.body && typeof newInit.body === "string") {
+    try {
+      const body = JSON.parse(newInit.body)
+      if (body && typeof body === "object") {
+        newInit.body = JSON.stringify(chatCompletionsBodyToResponses(body as Record<string, unknown>))
+      }
+    } catch {
+      // leave body unchanged
+    }
+  }
+  return newInit
+}
+
 function makeToolCallNormalizingFetch(customFetch: (input: any, init?: any) => Promise<Response> = globalThis.fetch) {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     let url = typeof input === "string" ? input : input instanceof Request ? input.url : String((input as any)?.url ?? "")
 
+    // Azure Foundry / OpenAI v1: prefer POST /responses. Models like
+    // gpt-5.1-codex-mini reject Chat Completions entirely. Translate the
+    // body (messages→input, max_tokens→max_output_tokens) before the first
+    // attempt so we never send a Chat Completions payload that Azure 400s on.
+    // If /responses is unavailable for this model, fall back to the original
+    // /chat/completions request so classic chat models on the same host still work.
+    if (isAzureV1ChatCompletionsUrl(url)) {
+      const responsesUrl = url.replace(/\/chat\/completions\/?(?=\?|$)/, "/responses")
+      const responsesInit = rewriteInitBodyToResponses(init)
+      let model: string | undefined
+      try {
+        if (typeof responsesInit.body === "string") {
+          model = JSON.parse(responsesInit.body)?.model
+        }
+      } catch { /* ignore */ }
+
+      logProviderRequestDebug({
+        provider: "azure",
+        endpointType: "azure-v1",
+        url: responsesUrl,
+        model,
+        auth: "api-key",
+        pathRewrite: "chat/completions→responses",
+      })
+
+      const responsesRes = await customFetch(responsesUrl, responsesInit)
+      if (responsesRes.ok && responsesRes.body) {
+        return normalizeResponsesApiResponse(responsesRes)
+      }
+
+      // Fall back to Chat Completions only when Responses clearly isn't
+      // the right API for this model/deployment (404 / "not found" / etc.).
+      let fallbackToChat = responsesRes.status === 404
+      if (!fallbackToChat && !responsesRes.ok) {
+        try {
+          const errJson = await responsesRes.clone().json()
+          const msg = String(errJson?.error?.message ?? errJson?.message ?? "").toLowerCase()
+          fallbackToChat =
+            msg.includes("not found") ||
+            msg.includes("unknown path") ||
+            msg.includes("no such endpoint") ||
+            msg.includes("chat completions") && msg.includes("instead")
+        } catch {
+          fallbackToChat = false
+        }
+      }
+
+      if (!fallbackToChat) {
+        // Prefer the Responses error — it names the real problem (e.g. bad
+        // max_tokens) rather than a misleading chat/completions 400.
+        return responsesRes
+      }
+      // else: fall through to the original Chat Completions request below
+    }
+
     let res = await customFetch(input, init)
 
-    // Fallback/translation for Azure AI Foundry / OpenAI Responses API endpoints
+    // Fallback/translation for other OpenAI-compatible hosts that reject
+    // Chat Completions and require the Responses API.
     if (!res.ok && url.endsWith("/chat/completions")) {
       const clonedRes = res.clone()
       try {
         const errJson = await clonedRes.json()
-        const errMsg = errJson?.error?.message ?? ""
-        if (errMsg.includes("operation is unsupported") || errMsg.includes("Unsupported parameter") || errMsg.includes("Responses API")) {
+        const errMsg = String(errJson?.error?.message ?? errJson?.message ?? "")
+        if (shouldRetryChatAsResponses(errMsg)) {
           const responsesUrl = url.replace(/\/chat\/completions$/, "/responses")
-          let newInit = { ...(init ?? {}) }
-          if (newInit.body && typeof newInit.body === "string") {
-            try {
-              const body = JSON.parse(newInit.body)
-              if (body.messages) {
-                body.input = body.messages
-                delete body.messages
-              }
-              newInit.body = JSON.stringify(body)
-            } catch {}
-          }
+          const newInit = rewriteInitBodyToResponses(init)
+
+          logProviderRequestDebug({
+            provider: "openai-compatible",
+            endpointType: "responses-fallback",
+            url: responsesUrl,
+            auth: "unknown",
+            pathRewrite: "chat/completions→responses (fallback)",
+          })
 
           const responsesRes = await customFetch(responsesUrl, newInit)
           if (responsesRes.ok && responsesRes.body) {
             return normalizeResponsesApiResponse(responsesRes)
           }
+          // Prefer the Responses error over the original chat/completions 400 —
+          // it usually names the real unsupported field (e.g. max_tokens).
+          if (!responsesRes.ok) return responsesRes
         }
-      } catch {}
+      } catch {
+        // ignore parse errors; return original response
+      }
     }
 
     if (!res.ok || !res.body) return res
@@ -666,47 +879,33 @@ async function normalizeJsonToolCallResponse(res: Response): Promise<Response> {
 
 /** OpenAI-compatible adapter path. Exported for direct unit testing. */
 export function buildOpenAICompatibleModel(target: RouteTarget) {
-  let baseUrl = target.baseUrl
-  if (baseUrl.endsWith("/chat/completions/")) {
-    baseUrl = baseUrl.slice(0, -"/chat/completions/".length)
-  } else if (baseUrl.endsWith("/chat/completions")) {
-    baseUrl = baseUrl.slice(0, -"/chat/completions".length)
-  }
-
-  const lowerUrl = baseUrl.toLowerCase()
-  const isAzure = lowerUrl.includes("openai.azure.com") || lowerUrl.includes("services.ai.azure.com")
-  const isAzureV1 = isAzure && lowerUrl.includes("/openai/v1")
-  const isAzureClassic = isAzure && !isAzureV1
-
-  // Classic Azure deployment API formatting
-  if (isAzureClassic) {
-    const parsedUrl = new URL(baseUrl)
-    if (!parsedUrl.pathname.includes("/openai/deployments/")) {
-      const cleanPath = parsedUrl.pathname.replace(/\/+$/, "")
-      parsedUrl.pathname = `${cleanPath}/openai/deployments/${target.modelId}`
-    }
-    if (!parsedUrl.searchParams.has("api-version")) {
-      parsedUrl.searchParams.set("api-version", "2024-10-21")
-    }
-    baseUrl = parsedUrl.toString()
-  }
+  const { baseUrl, azureKind } = resolveOpenAICompatibleBaseUrl(target)
+  const isAzure = azureKind !== "none"
 
   const headers: Record<string, string> = {
     "HTTP-Referer": env.APP_URL,
     "X-Title": "zen-gateway",
   }
-  if (target.apiKey) {
-    if (isAzure) {
-      headers["api-key"] = target.apiKey
-    } else {
-      headers["api-key"] = target.apiKey
-    }
+  // Azure / Foundry expect `api-key` (not Authorization: Bearer). Setting both
+  // can confuse some gateways — use api-key only for Azure.
+  if (isAzure && target.apiKey) {
+    headers["api-key"] = target.apiKey
+  }
+
+  if (PROVIDER_REQUEST_DEBUG) {
+    log.debug("provider_adapter_config", {
+      provider: target.providerName,
+      endpoint_type: azureKind === "none" ? "openai-compatible" : azureKind,
+      base_url: baseUrl,
+      model: target.modelId,
+      auth: isAzure ? "api-key" : "bearer",
+    })
   }
 
   const provider = createOpenAICompatible({
     name: target.providerName,
     baseURL: baseUrl,
-    // Avoid sending conflicting Authorization: Bearer header when api-key header is used for Azure.
+    // Avoid sending conflicting Authorization: Bearer when api-key is used for Azure.
     apiKey: isAzure ? undefined : (target.apiKey || undefined),
     headers,
     fetch: makeToolCallNormalizingFetch() as unknown as typeof fetch,
