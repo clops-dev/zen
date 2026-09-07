@@ -181,20 +181,10 @@ function normalizeToolArgs(args: unknown): string {
 
 function toModel(target: RouteTarget) {
   if (target.providerType === "anthropic-compatible") {
-    // Anthropic-compatible adapter. The Anthropic SDK appends /messages to
-    // whatever baseURL it's given — it does NOT auto-append /v1 (that only
-    // happens when baseURL is exactly https://api.anthropic.com). So for
-    // AgentRouter the baseURL is the literal "https://agentrouter.org" and
-    // the final URL becomes "https://agentrouter.org/messages" by
-    // construction.
-    //
-    // `authToken` is sent as `Authorization: Bearer <token>`, matching the
-    // task's auth spec. The SDK also auto-sets `anthropic-version:
-    // 2023-06-01` for us.
-    //
-    // `apiKey` (x-api-key header) is intentionally NOT used here — the
-    // task spec requires Bearer auth for AgentRouter.
     return buildAnthropicModel(target)
+  }
+  if (target.providerType === "custom") {
+    return buildCustomModel(target)
   }
 
   return buildOpenAICompatibleModel(target)
@@ -718,6 +708,31 @@ export function buildOpenAICompatibleModel(target: RouteTarget) {
     baseURL: baseUrl,
     // Avoid sending conflicting Authorization: Bearer header when api-key header is used for Azure.
     apiKey: isAzure ? undefined : (target.apiKey || undefined),
+    headers,
+    fetch: makeToolCallNormalizingFetch() as unknown as typeof fetch,
+  })
+  return provider(target.modelId)
+}
+
+/**
+ * Custom provider adapter. Uses the base URL exactly as stored — no Azure
+ * path rewriting, no `/chat/completions` suffix stripping. The admin is
+ * expected to supply the full base URL (e.g. `https://my-server.internal`).
+ * Routing calls are dispatched via the OpenAI-compatible SDK so the wire
+ * format is OpenAI's `/chat/completions`. Useful for self-hosted models,
+ * custom gateways, or any provider that speaks the OpenAI protocol but
+ * needs the URL left completely untouched.
+ */
+export function buildCustomModel(target: RouteTarget) {
+  const headers: Record<string, string> = {}
+  if (target.apiKey) {
+    headers["Authorization"] = `Bearer ${target.apiKey}`
+  }
+
+  const provider = createOpenAICompatible({
+    name: target.providerName,
+    baseURL: target.baseUrl,
+    apiKey: target.apiKey || undefined,
     headers,
     fetch: makeToolCallNormalizingFetch() as unknown as typeof fetch,
   })

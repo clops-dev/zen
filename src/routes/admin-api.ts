@@ -531,7 +531,7 @@ adminApi.get("/providers", async (c) => {
 const providerCreateSchema = z.object({
   name: z.string().min(1).max(128),
   base_url: z.string().url(),
-  provider_type: z.enum(["openai-compatible", "anthropic-compatible"]).default("openai-compatible"),
+  provider_type: z.enum(["openai-compatible", "anthropic-compatible", "custom"]).default("openai-compatible"),
   api_key: z.string().optional().default(""),
   enabled: z.boolean().default(true),
   organization: z.string().optional(),

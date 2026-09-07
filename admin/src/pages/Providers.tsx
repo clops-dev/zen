@@ -1,6 +1,6 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CheckCircle2, Copy, Edit3, Loader2, Plus, Power, TestTube2, Trash2, XCircle } from "lucide-react"
+import { Edit3, Loader2, Plus, Power, TestTube2, Trash2 } from "lucide-react"
 import {
   createProvider,
   deleteProvider,
@@ -25,7 +25,7 @@ export function ProvidersPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Providers</h1>
           <p className="text-muted text-sm mt-0.5">
-            Connect any OpenAI-compatible or Anthropic-compatible upstream. Secret keys are stored server-side and never re-exposed after save.
+            Connect any OpenAI-compatible, Anthropic-compatible, or custom upstream. Secret keys are stored server-side and never re-exposed after save.
           </p>
         </div>
         <button className="btn-primary" onClick={() => { setEditing(null); setOpen(true) }}>
@@ -179,7 +179,7 @@ function ProviderDialog({
 }) {
   const [name, setName] = useState(initial?.name ?? "")
   const [baseUrl, setBaseUrl] = useState(initial?.base_url ?? "https://openrouter.ai/api/v1")
-  const [providerType, setProviderType] = useState(initial?.provider_type ?? "openai-compatible")
+  const [providerType, setProviderType] = useState<string>(initial?.provider_type ?? "openai-compatible")
   const [apiKey, setApiKey] = useState("")
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
   const [org, setOrg] = useState<string>((initial?.meta as any)?.organization ?? "")
@@ -190,6 +190,26 @@ function ProviderDialog({
   const [priority, setPriority] = useState<number>((initial?.meta as any)?.priority ?? 50)
   const [weight, setWeight] = useState<number>((initial?.meta as any)?.weight ?? 1)
   const [costMultiplier, setCostMultiplier] = useState<number>((initial?.meta as any)?.cost_multiplier ?? 1)
+
+  // Re-populate every field whenever the dialog opens or the edited provider changes.
+  // useState initializers only run on first mount, so switching from "Edit A" to
+  // "Edit B" without unmounting the dialog would otherwise show stale data.
+  useEffect(() => {
+    if (!open) return
+    setName(initial?.name ?? "")
+    setBaseUrl(initial?.base_url ?? "https://openrouter.ai/api/v1")
+    setProviderType(initial?.provider_type ?? "openai-compatible")
+    setApiKey("")
+    setEnabled(initial?.enabled ?? true)
+    setOrg((initial?.meta as any)?.organization ?? "")
+    setRegion((initial?.meta as any)?.region ?? "")
+    setTimeoutMs(String((initial?.meta as any)?.timeout_ms ?? ""))
+    setRetryMax(String((initial?.meta as any)?.retry_max ?? ""))
+    setRateLimitRpm(String((initial?.meta as any)?.rate_limit_rpm ?? ""))
+    setPriority((initial?.meta as any)?.priority ?? 50)
+    setWeight((initial?.meta as any)?.weight ?? 1)
+    setCostMultiplier((initial?.meta as any)?.cost_multiplier ?? 1)
+  }, [open, initial])
 
   const qc = useQueryClient()
   const toast = useToast()
@@ -247,12 +267,21 @@ function ProviderDialog({
           <input className="input w-full" required value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
         <Field label="Provider type">
-          <select className="input w-full" value={providerType} onChange={(e) => setProviderType(e.target.value as any)}>
+          <select className="input w-full" value={providerType} onChange={(e) => setProviderType(e.target.value)}>
             <option value="openai-compatible">openai-compatible</option>
             <option value="anthropic-compatible">anthropic-compatible</option>
+            <option value="custom">custom</option>
           </select>
         </Field>
-        <Field label="Base URL" className="md:col-span-2">
+        <Field
+          label="Base URL"
+          className="md:col-span-2"
+          hint={
+            providerType === "custom"
+              ? "Used verbatim — no path appended. Your endpoint must accept POST /chat/completions at this base URL."
+              : undefined
+          }
+        >
           <input className="input w-full font-mono" required value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
         </Field>
         <Field label="API key" className="md:col-span-2" hint={initial ? "Leave blank to keep the existing key." : undefined}>

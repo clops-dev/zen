@@ -52,7 +52,7 @@ export interface RouteTarget {
   supportsTools: boolean
   supportsVision: boolean
   supportsJsonMode: boolean
-  providerType: "openai-compatible" | "anthropic-compatible"
+  providerType: "openai-compatible" | "anthropic-compatible" | "custom"
 }
 
 interface Candidate {
@@ -72,7 +72,7 @@ interface Candidate {
   supports_vision: boolean
   supports_json_mode: boolean
   weight: number
-  provider_type: "openai-compatible" | "anthropic-compatible"
+  provider_type: "openai-compatible" | "anthropic-compatible" | "custom"
 }
 
 function weightedPick<T extends { weight: number }>(items: T[]): T | null {

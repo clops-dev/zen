@@ -42,7 +42,7 @@ export type Provider = {
   id: string
   name: string
   base_url: string
-  provider_type: "openai-compatible" | "anthropic-compatible"
+  provider_type: "openai-compatible" | "anthropic-compatible" | "custom"
   enabled: boolean
   healthy: boolean
   health_state?: "HEALTHY" | "DEGRADED" | "DOWN" | "RECOVERING"

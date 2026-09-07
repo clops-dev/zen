@@ -189,7 +189,21 @@ function NewRouteDialog({
         </label>
 
         <div className="flex flex-col gap-2 col-span-2">
-          <span className="label">Tiers</span>
+          <div className="flex items-center justify-between">
+            <span className="label">Tiers</span>
+            <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={selectedTiers.length === TIERS.length}
+                ref={(el) => {
+                  if (el) el.indeterminate = selectedTiers.length > 0 && selectedTiers.length < TIERS.length
+                }}
+                onChange={(e) => setSelectedTiers(e.target.checked ? [...TIERS] : [])}
+                className="rounded border-line"
+              />
+              Select all
+            </label>
+          </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {TIERS.map((t) => (
               <label

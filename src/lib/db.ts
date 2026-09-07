@@ -149,7 +149,7 @@ export type ProviderRow = {
    * via @ai-sdk/openai-compatible. "anthropic-compatible" → /messages via
    * @ai-sdk/anthropic (Bearer auth, anthropic-version header). Defaults to
    * "openai-compatible" for legacy rows that pre-date the column. */
-  provider_type: "openai-compatible" | "anthropic-compatible"
+  provider_type: "openai-compatible" | "anthropic-compatible" | "custom"
 }
 
 export type ModelRow = {
