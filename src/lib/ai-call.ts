@@ -94,6 +94,26 @@ export function chatCompletionsBodyToResponses(body: Record<string, unknown>): R
   }
   delete out.max_tokens
 
+  // Flatten tools for Responses API: { type: "function", function: { name, description, parameters } } -> { type: "function", name, description, parameters }
+  if (Array.isArray(out.tools)) {
+    out.tools = out.tools.map((t: any) => {
+      if (t && typeof t === "object" && t.type === "function" && t.function && typeof t.function === "object") {
+        return {
+          type: "function",
+          name: t.function.name,
+          description: t.function.description,
+          parameters: t.function.parameters,
+          ...(t.function.strict !== undefined ? { strict: t.function.strict } : {}),
+        }
+      }
+      return t
+    })
+  }
+
+  if (out.tool_choice && typeof out.tool_choice === "object" && (out.tool_choice as any).function?.name) {
+    out.tool_choice = { type: "function", name: (out.tool_choice as any).function.name }
+  }
+
   // Chat Completions-only fields that Responses rejects.
   delete out.n
   delete out.logprobs
@@ -496,6 +516,57 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
         }
         return `data: ${JSON.stringify(chunk)}`
       }
+      if (parsed.type === "response.output_item.added" && parsed.item?.type === "function_call") {
+        const chunk = {
+          id: parsed.item.id ?? `chatcmpl_${Date.now()}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          choices: [
+            {
+              index: parsed.output_index ?? 0,
+              delta: {
+                tool_calls: [
+                  {
+                    index: parsed.output_index ?? 0,
+                    id: parsed.item.call_id || parsed.item.id,
+                    type: "function",
+                    function: {
+                      name: parsed.item.name,
+                      arguments: parsed.item.arguments ?? "",
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        }
+        return `data: ${JSON.stringify(chunk)}`
+      }
+      if (parsed.type === "response.function_call_arguments.delta" && typeof parsed.delta === "string") {
+        const chunk = {
+          id: parsed.item_id ?? `chatcmpl_${Date.now()}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          choices: [
+            {
+              index: parsed.output_index ?? 0,
+              delta: {
+                tool_calls: [
+                  {
+                    index: parsed.output_index ?? 0,
+                    function: {
+                      arguments: parsed.delta,
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        }
+        return `data: ${JSON.stringify(chunk)}`
+      }
       if (parsed.type === "response.completed") {
         const finishChunk = {
           id: parsed.response?.id ?? `chatcmpl_${Date.now()}`,
@@ -518,24 +589,31 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
   const stream = new ReadableStream({
     async pull(controller) {
       try {
-        const { value, done } = await reader.read()
-        if (done) {
-          if (buffer.trim()) {
-            const transformed = transformLine(buffer)
-            if (transformed) controller.enqueue(encoder.encode(transformed + "\n"))
-            buffer = ""
+        while (controller.desiredSize !== null && controller.desiredSize > 0) {
+          const { value, done } = await reader.read()
+          if (done) {
+            if (buffer.trim()) {
+              const transformed = transformLine(buffer)
+              if (transformed) controller.enqueue(encoder.encode(transformed + "\n\n"))
+              buffer = ""
+            }
+            controller.close()
+            return
           }
-          controller.close()
-          return
-        }
 
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split("\n")
-        buffer = lines.pop() ?? ""
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split("\n")
+          buffer = lines.pop() ?? ""
 
-        for (const line of lines) {
-          const transformed = transformLine(line)
-          if (transformed) controller.enqueue(encoder.encode(transformed + "\n"))
+          let enqueuedAny = false
+          for (const line of lines) {
+            const transformed = transformLine(line)
+            if (transformed) {
+              controller.enqueue(encoder.encode(transformed + "\n\n"))
+              enqueuedAny = true
+            }
+          }
+          if (enqueuedAny) break
         }
       } catch (err) {
         controller.error(err)
@@ -622,29 +700,13 @@ function makeToolCallNormalizingFetch(customFetch: (input: any, init?: any) => P
         return normalizeResponsesApiResponse(responsesRes)
       }
 
-      // Fall back to Chat Completions only when Responses clearly isn't
-      // the right API for this model/deployment (404 / "not found" / etc.).
-      let fallbackToChat = responsesRes.status === 404
-      if (!fallbackToChat && !responsesRes.ok) {
-        try {
-          const errJson = await responsesRes.clone().json()
-          const msg = String(errJson?.error?.message ?? errJson?.message ?? "").toLowerCase()
-          fallbackToChat =
-            msg.includes("not found") ||
-            msg.includes("unknown path") ||
-            msg.includes("no such endpoint") ||
-            msg.includes("chat completions") && msg.includes("instead")
-        } catch {
-          fallbackToChat = false
-        }
+      // Fall back to native Chat Completions if Responses failed for any reason.
+      // Many Azure deployments (e.g. standard gpt-4o, gpt-4.1-mini) serve /chat/completions natively.
+      const chatRes = await customFetch(input, init)
+      if (chatRes.ok) {
+        return chatRes
       }
-
-      if (!fallbackToChat) {
-        // Prefer the Responses error — it names the real problem (e.g. bad
-        // max_tokens) rather than a misleading chat/completions 400.
-        return responsesRes
-      }
-      // else: fall through to the original Chat Completions request below
+      return responsesRes
     }
 
     let res = await customFetch(input, init)
