@@ -126,9 +126,9 @@ export const env = {
     return intEnv("UPSTREAM_TIMEOUT_MS_STREAMING", 60_000)
   },
   /** Streaming connect timeout (ms). TCP+TLS handshake budget before the
-   * first byte. Default: 10 000 ms (10 s). */
+   * first byte. Default: 30 000 ms (30 s). */
   get UPSTREAM_CONNECT_TIMEOUT_MS() {
-    return intEnv("UPSTREAM_CONNECT_TIMEOUT_MS", 10_000)
+    return intEnv("UPSTREAM_CONNECT_TIMEOUT_MS", 30_000)
   },
   /** Streaming first-token timeout (ms). Time from request start to the
    * first valid chunk (text, reasoning, or tool call). Default: 120 000 ms

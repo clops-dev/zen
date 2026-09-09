@@ -548,6 +548,14 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           })
           await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
         } catch (err) {
+          const isClientCancel =
+            (err instanceof Error && (
+              err.message.includes("stream cancelled by client") ||
+              err.message.includes("cancelled by client") ||
+              err.name === "AbortError"
+            )) ||
+            (typeof err === "string" && (err.includes("stream cancelled by client") || err.includes("cancelled by client")))
+
           const classification = classifyProviderError(err)
           const rejectReason = (err as UpstreamTimeoutError)?.rejectReason
           console.error(
@@ -558,8 +566,18 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             ` stage=mid_stream`,
             err,
           )
-          await reportRouteOutcome(target.providerId, { success: false, error: err })
-          await recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: "mid_stream_failure: " + failureReason(err), requestId: reqId })
+          if (!isClientCancel) {
+            await reportRouteOutcome(target.providerId, { success: false, error: err })
+          }
+          await recordRequest({
+            userId: user.id,
+            ip,
+            modelLabel: target.label,
+            promptHash: cacheKey,
+            status: "failure",
+            rejectReason: isClientCancel ? "client_cancelled" : ("mid_stream_failure: " + failureReason(err)),
+            requestId: reqId,
+          })
         }
       })())
 

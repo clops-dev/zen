@@ -1585,16 +1585,13 @@ const stream = new ReadableStream({
             if (idleTimer === null) armIdleTimer()
             else armIdleTimer() // reset
           } else {
-            // Non-content chunks (start, start-step, finish-step,
-            // metadata, abort-ack, etc.) — DON'T clear the pre-first-byte
-            // timers here. The SDK synthesizes a `start` chunk BEFORE the
-            // upstream fetch has completed: clearing the connect timer
-            // would mask a hung upstream as if we'd already heard from
-            // the provider. The firstToken timer is the authoritative
-            // pre-first-byte budget and it stays armed. We do arm the
-            // idle timer on this first contact so a stream that goes
-            // silent after metadata but before content still aborts
-            // within idleTimeoutMs instead of hanging forever.
+            // If we receive any chunk beyond the SDK's local synthetic `start` (e.g. response-metadata),
+            // the upstream connection has succeeded. Clear connectTimer so a valid connection is not aborted.
+            // firstTokenTimer remains armed to catch any hung model.
+            if (chunk.type !== 'start' && connectTimer !== null) {
+              clearTimeout(connectTimer)
+              connectTimer = null
+            }
             if (idleTimer === null) armIdleTimer()
             else armIdleTimer() // reset
           }

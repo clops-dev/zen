@@ -126,7 +126,11 @@ async function getAnyCandidate(): Promise<Candidate[]> {
     JOIN providers p ON p.id = m.provider_id
     WHERE m.enabled = true AND p.enabled = true
   `) as any
-  return rows.filter((r: any) => isCandidateAvailable(r, now))
+  const available = rows.filter((r: any) => isCandidateAvailable(r, now))
+  if (available.length === 0 && rows.length > 0) {
+    return rows
+  }
+  return available
 }
 
 function isCandidateAvailable(r: any, now: number): boolean {
