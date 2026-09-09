@@ -105,7 +105,7 @@ describe("message-normalizer", () => {
         { type: "text", text: "Look at this:" },
         { type: "image_url", image_url: { url: "http://example.com/image.png" } }
       ]
-    })
+    } as any)
     expect(result.nonSystemMessages[1]).toEqual({
       role: "assistant",
       content: "Nice image!"

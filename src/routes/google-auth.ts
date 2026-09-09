@@ -218,19 +218,25 @@ googleAuth.get("/google/callback", async (c) => {
       }
     }
 
+    let userRole: "user" | "admin" = "user"
+    const [userRecord] = await sql`SELECT role FROM users WHERE id = ${userId}`
+    if (userRecord?.role === "admin") {
+      userRole = "admin"
+    }
+
     // Verify the account isn't suspended.
     const [sub] = await sql`SELECT status FROM subscriptions WHERE user_id = ${userId}`
     if (sub?.status === "suspended") {
       return c.redirect("/zencode/login?error=account_suspended", 303)
     }
+
+    // Issue session cookie with the user's actual database role.
+    const session = issueSession(userId, userRole)
+    setCookie(c, SESSION_COOKIE, session.token, SESSION_COOKIE_OPTIONS)
   } catch (err) {
     console.error("[google-auth] db upsert failed:", err)
     return c.redirect("/zencode/login?error=db_error", 303)
   }
-
-  // Issue session cookie.
-  const session = issueSession(userId, "user")
-  setCookie(c, SESSION_COOKIE, session.token, SESSION_COOKIE_OPTIONS)
 
   // If the user came from `zencode login` (device flow), approve the device code.
   if (deviceCode) {

@@ -16,10 +16,26 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   })
   if (res.status === 204) return undefined as T
   const text = await res.text()
-  const body = text ? JSON.parse(text) : null
+  let body: any = null
+  if (text) {
+    try {
+      body = JSON.parse(text)
+    } catch {
+      body = null
+    }
+  }
   if (!res.ok) {
-    const err = body as ApiError
-    throw new ApiClientError(err?.error ?? `http_${res.status}`, err?.message ?? res.statusText, res.status)
+    if (res.status === 401) {
+      throw new ApiClientError("unauthorized", "Authentication required. Please log in.", 401)
+    }
+    if (res.status === 403) {
+      throw new ApiClientError("forbidden", "Admin access required. Your account does not have admin permissions.", 403)
+    }
+    const err = body as ApiError | null
+    const fallbackMsg = text?.startsWith("<")
+      ? `HTTP ${res.status}: Server returned an error page`
+      : (text || res.statusText)
+    throw new ApiClientError(err?.error ?? `http_${res.status}`, err?.message ?? fallbackMsg, res.status)
   }
   return body as T
 }

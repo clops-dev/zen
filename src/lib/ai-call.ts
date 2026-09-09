@@ -1086,6 +1086,7 @@ export type ProviderErrorClassification = {
     // as distinct buckets instead of being lumped into generic
     // "rate_limited"/"server_error"/"unknown".
     | "quota_exceeded" | "provider_busy"
+    | "content_policy_violation" | "unsupported_parameter" | "context_length_exceeded"
   statusCode?: number
 }
 
