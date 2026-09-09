@@ -4,6 +4,8 @@ import { deviceAuth } from "./routes/device-auth"
 import { gateway } from "./routes/gateway"
 import { web } from "./routes/web"
 import { adminApi } from "./routes/admin-api"
+import { googleAuth } from "./routes/google-auth"
+import { userApi } from "./routes/user-api"
 import { requestId } from "./middleware/request-id"
 import { readyz } from "./lib/readiness"
 import { log } from "./lib/logger"
@@ -108,6 +110,12 @@ v1.route("/auth", deviceAuth) // POST /v1/auth/device/start, GET /v1/auth/device
 v1.route("/", gateway) // POST /v1/chat/completions, GET /v1/models
 app.route("/v1", v1)
 
+// Google OAuth routes for the zencode user portal.
+app.route("/auth", googleAuth)
+
+// Protected JSON API for the zencode React SPA (/user-api/*).
+app.route("/user-api", userApi)
+
 // Legacy user-facing web UI (login / signup / per-user dashboard /
 // device-pair page). The previous SSR admin surface at /admin was a
 // quick prototype — we removed it in favour of the React SPA at /admin2,
@@ -127,6 +135,42 @@ app.route("/admin-api", adminApi)
 // `/admin2/assets/...` and we just serve them straight from disk.
 const here = path.dirname(fileURLToPath(import.meta.url))
 const spaDir = path.resolve(here, "..", "admin", "dist")
+
+// ---------------------------------------------------------------------------
+// Zencode user portal SPA (built by zencode/dist). Mounted at /zencode.
+// Vite is configured with `base: "/zencode/"` so built assets live at
+// /zencode/assets/... and the SPA client-side router handles /zencode/*.
+// ---------------------------------------------------------------------------
+const zencodeSpaDir = path.resolve(here, "..", "zencode", "dist")
+
+if (existsSync(zencodeSpaDir) && statSync(zencodeSpaDir).isDirectory()) {
+  app.get("/zencode/assets/*", (c) => {
+    const rel = c.req.path.replace(/^\/zencode\//, "")
+    const filePath = path.join(zencodeSpaDir, rel)
+    if (!filePath.startsWith(zencodeSpaDir)) return c.text("forbidden", 403)
+    return new Response(Bun.file(filePath))
+  })
+
+  const zencodeIndex = Bun.file(path.join(zencodeSpaDir, "index.html"))
+  const serveZencodeIndex = () =>
+    new Response(zencodeIndex, { headers: { "content-type": "text/html; charset=utf-8" } })
+  app.get("/zencode", serveZencodeIndex)
+  app.get("/zencode/*", serveZencodeIndex)
+} else {
+  const zencodeHolder = (c: any) =>
+    c.html(
+      `<!doctype html><meta charset=utf-8>
+      <body style="background:#0c0a09;color:#fafaf9;font-family:system-ui;padding:48px">
+      <h1 style="color:#ef4444">Zencode SPA not built</h1>
+      <p>Run the build once:</p>
+      <pre style="background:#1c1917;color:#ef4444;padding:12px;border-radius:6px">cd zencode && npm install && npm run build</pre>
+      <p>After that, /zencode will serve the React SPA.</p>
+      </body>`,
+      503,
+    )
+  app.get("/zencode", zencodeHolder)
+  app.get("/zencode/*", zencodeHolder)
+}
 
 if (existsSync(spaDir) && statSync(spaDir).isDirectory()) {
   app.get("/admin2/assets/*", (c) => {

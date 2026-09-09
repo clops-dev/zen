@@ -62,6 +62,17 @@ export const envSchema = z.object({
   // fine for local dev. Set this explicitly once deployed so the CLI always
   // gets the real public URL, not an internal/load-balancer hostname.
   WEB_URL: z.string().url().optional(),
+
+  // Google OAuth 2.0 credentials for the Zencode user portal.
+  // Create a project at https://console.cloud.google.com, enable "Google
+  // Identity Platform", and add the callback URL as an Authorised redirect URI.
+  // All three are optional — if absent, hitting /auth/google returns a 503
+  // with a clear message rather than crashing the whole gateway.
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  // e.g. http://localhost:8787/auth/google/callback (dev)
+  //      https://yourdomain.com/auth/google/callback (prod)
+  GOOGLE_CALLBACK_URL: z.string().url().optional(),
 })
 
 const parsed = envSchema.parse(process.env)

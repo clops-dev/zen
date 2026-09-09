@@ -31,7 +31,9 @@ deviceAuth.post("/device/start", async (c) => {
 
   return c.json({
     device_code: deviceCode,
-    verification_url: `${webBaseUrl(c.req.url)}/device?code=${deviceCode}`,
+    // Point the CLI to the zencode React SPA login page. The SPA detects the
+    // ?code= query param and shows the "Connect CLI" Google-login flow.
+    verification_url: `${webBaseUrl(c.req.url)}/zencode/login?code=${deviceCode}`,
     expires_in: Math.floor(DEVICE_CODE_TTL_MS / 1000),
     poll_interval: 2,
   })

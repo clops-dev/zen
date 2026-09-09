@@ -5,6 +5,9 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
+    "build:admin": "cd admin && bun install && bun run build",
+    "build:zencode": "cd zencode && bun install && bun run build",
+    "build": "bun run build:admin && bun run build:zencode",
     "test": "UPSTREAM_TIMEOUT_MS_NON_STREAMING=200 UPSTREAM_IDLE_TIMEOUT_MS_STREAMING=300 UPSTREAM_CONNECT_TIMEOUT_MS=200 UPSTREAM_FIRST_TOKEN_TIMEOUT_MS=300 UPSTREAM_MAX_STREAM_DURATION_MS=2000 bun test",
     "typecheck": "tsc --noEmit",
     "verify-models": "bun run scripts/verify-models.ts",

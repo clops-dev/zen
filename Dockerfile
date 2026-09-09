@@ -32,12 +32,16 @@ WORKDIR /app
 # backend source changes. `bun.lock` is the lockfile (canonical for Bun).
 COPY package.json bun.lock ./
 COPY admin/package.json admin/bun.lock ./admin/
+COPY zencode/package.json zencode/bun.lock ./zencode/
 
 # Install all deps for the backend (including devDependencies for TS types).
 RUN bun install --frozen-lockfile
 
 # Install admin workspace deps for the SPA build.
 RUN cd admin && bun install --frozen-lockfile
+
+# Install zencode workspace deps for the SPA build.
+RUN cd zencode && bun install --frozen-lockfile
 
 # Copy the source and run the SPA build. The backend is run directly from
 # TS via Bun's transpile-and-execute — no separate backend compile step.
@@ -46,12 +50,14 @@ COPY migrations ./migrations
 COPY scripts ./scripts
 COPY tsconfig.json ./
 COPY admin ./admin
+COPY zencode ./zencode
 
 RUN cd admin && bun run build
+RUN cd zencode && bun run build
 
 # ---- Stage 2: minimal runtime ------------------------------------------------
-# Fresh layer — only the runtime artifacts, no build tools, no admin source,
-# no admin node_modules (the SPA is already compiled into admin/dist).
+# Fresh layer — only the runtime artifacts, no build tools, no admin/zencode source,
+# no frontend node_modules (the SPAs are already compiled into admin/dist & zencode/dist).
 FROM ${OVEN_IMAGE} AS runtime
 
 ARG VERSION=dev
@@ -68,13 +74,13 @@ WORKDIR /app
 USER bun
 
 # Backend runtime files only.
-# Correctness note: admin/node_modules is intentionally NOT copied here.
-# The admin SPA (Vite/React/Tailwind) is a build artifact — everything
-# the runtime needs from admin is in admin/dist. Copying admin/node_modules
-# would bloat the image with ~100 MB of devDependencies and vite internals.
+# Correctness note: admin/node_modules and zencode/node_modules are intentionally NOT copied here.
+# The SPAs (Vite/React/Tailwind) are build artifacts — everything
+# the runtime needs is in admin/dist and zencode/dist.
 COPY --chown=bun:bun package.json bun.lock ./
 COPY --chown=bun:bun --from=build /app/node_modules ./node_modules
 COPY --chown=bun:bun --from=build /app/admin/dist ./admin/dist
+COPY --chown=bun:bun --from=build /app/zencode/dist ./zencode/dist
 COPY --chown=bun:bun --from=build /app/src ./src
 COPY --chown=bun:bun --from=build /app/migrations ./migrations
 COPY --chown=bun:bun --from=build /app/tsconfig.json ./tsconfig.json
