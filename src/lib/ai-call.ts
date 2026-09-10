@@ -582,6 +582,51 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
         }
         return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
       }
+      // `response.incomplete` fires when generation stops early (hit
+      // max_output_tokens, content filter, etc.) without a normal
+      // `response.completed`. Longer prompts/completions hit this far
+      // more often than a trivial "hi" ever would. Without an explicit
+      // finish_reason + [DONE] here, the downstream Chat Completions
+      // parser never sees a terminal chunk and keeps waiting for one —
+      // the request eventually dies on the idle-stream timeout instead
+      // of failing (or succeeding) promptly.
+      if (parsed.type === "response.incomplete") {
+        const reason = parsed.response?.incomplete_details?.reason
+        const finish_reason = reason === "max_output_tokens" ? "length" : reason === "content_filter" ? "content_filter" : "stop"
+        const finishChunk = {
+          id: parsed.response?.id ?? `chatcmpl_${Date.now()}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason,
+            },
+          ],
+        }
+        return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
+      }
+      // `response.failed` / a bare `error` event: the upstream call died
+      // mid-stream. Terminate with [DONE] rather than letting the
+      // connection sit open — any content already streamed still reaches
+      // the client, and the gateway's fallback loop isn't blocked behind
+      // an idle-timeout it would otherwise have to wait out.
+      if (parsed.type === "response.failed" || parsed.type === "error") {
+        const finishChunk = {
+          id: parsed.response?.id ?? `chatcmpl_${Date.now()}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: "stop",
+            },
+          ],
+        }
+        return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
+      }
     } catch {}
     return null
   }

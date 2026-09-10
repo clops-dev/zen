@@ -265,4 +265,33 @@ describe("Azure OpenAI / Microsoft Foundry Provider Support", () => {
       globalThis.fetch = prevFetch
     }
   })
+
+  it("terminates the stream on response.incomplete (e.g. max_output_tokens) instead of hanging", async () => {
+    const prevFetch = globalThis.fetch
+    globalThis.fetch = (async () => {
+      const sse =
+        `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "partial answer" })}\n\n` +
+        `data: ${JSON.stringify({ type: "response.incomplete", response: { id: "resp_1", incomplete_details: { reason: "max_output_tokens" } } })}\n\n`
+      return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })
+    }) as typeof fetch
+
+    try {
+      const model = buildOpenAICompatibleModel(target({
+        providerName: "azure-openai",
+        baseUrl: "https://mohamedaminkhelifa-1459-resource.services.ai.azure.com/openai/v1",
+        modelId: "gpt-4.1-mini",
+      }))
+      const { streamText } = await import("ai")
+      const result = streamText({ model, messages: [{ role: "user", content: "a very long prompt" }], maxRetries: 0 })
+
+      let text = ""
+      for await (const chunk of result.textStream) text += chunk
+      const finishReason = await result.finishReason
+
+      expect(text).toBe("partial answer")
+      expect(finishReason).toBe("length")
+    } finally {
+      globalThis.fetch = prevFetch
+    }
+  })
 })
