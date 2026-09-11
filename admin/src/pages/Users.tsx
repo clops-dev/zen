@@ -1,6 +1,7 @@
 import { useState } from "react"
+import { Link } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { DollarSign, Edit3, Plus, Trash2 } from "lucide-react"
+import { Coins, Edit3, Plus, Trash2 } from "lucide-react"
 import { createUser, deleteUser, listUsers, updateUser, type User } from "../api"
 import { Modal } from "../ui/Modal"
 import { useToast } from "../ui/Toast"
@@ -131,7 +132,7 @@ function UserRow({ u, onEditCap }: { u: User; onEditCap: (u: User) => void }) {
       <td className="text-right font-mono text-xs">
         {capEnabled && capUsd !== null ? (
           <>
-            <div className="font-semibold">${currentUsage.toFixed(2)} / ${capUsd.toFixed(2)}</div>
+            <div className="font-semibold">${currentUsage.toFixed(2)} / ${capUsd!.toFixed(2)}</div>
             <div className="text-muted">Remaining: ${remaining != null ? remaining.toFixed(2) : "0.00"}</div>
           </>
         ) : (
@@ -155,13 +156,13 @@ function UserRow({ u, onEditCap }: { u: User; onEditCap: (u: User) => void }) {
       <td className="text-xs">{u.last_login_at ? new Date(u.last_login_at).toLocaleString() : <span className="text-muted">never</span>}</td>
       <td className="text-right">
         <div className="flex items-center justify-end gap-1">
-          <button
+          <Link
+            to={`/users/${u.id}/credits`}
             className="btn-ghost"
-            onClick={() => onEditCap(u)}
-            title="Edit Spending Cap"
+            title="Manage Credits"
           >
-            <DollarSign className="size-4" />
-          </button>
+            <Coins className="size-4" />
+          </Link>
           <button
             className="btn-ghost text-bad"
             onClick={() => confirm(`Delete user ${u.email}?`) && del.mutate()}

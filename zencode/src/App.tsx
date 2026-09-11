@@ -6,7 +6,7 @@ import { ModelsPage } from '@/pages/ModelsPage';
 import { UsagePage } from '@/pages/UsagePage';
 import { CliPage } from '@/pages/CliPage';
 import { DocsPage } from '@/pages/DocsPage';
-import { BillingPage } from '@/pages/BillingPage';
+import { CreditsPage } from '@/pages/CreditsPage';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { LandingPage } from '@/pages/LandingPage';
@@ -48,7 +48,7 @@ export const App = () => {
       {/* Device flow success confirmation */}
       <Route path="/device-success" element={<DeviceSuccessPage />} />
 
-      {/* Protected dashboard routes */}
+      {/* Protected dashboard routes — require authenticated session */}
       <Route
         path="/app"
         element={isAuthenticated ? <DashboardLayout /> : <Navigate to="/login" replace />}
@@ -60,7 +60,10 @@ export const App = () => {
         <Route path="usage" element={<UsagePage />} />
         <Route path="cli" element={<CliPage />} />
         <Route path="docs/*" element={<DocsPage />} />
-        <Route path="billing" element={<BillingPage />} />
+        {/* Credits replaces the old billing page */}
+        <Route path="credits" element={<CreditsPage />} />
+        {/* Keep /billing working as a redirect for any old bookmarks */}
+        <Route path="billing" element={<Navigate to="/app/credits" replace />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
 

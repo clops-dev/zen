@@ -5,7 +5,13 @@ import { requireAdmin } from "../middleware/session-auth"
 import { audit, actorEmailFor } from "../lib/audit"
 import { fetchOpenRouterModelMetadata } from "../lib/openrouter"
 import { getUserSpending, monthStart } from "../lib/quota"
-
+import {
+  getBalance,
+  getTransactionHistory,
+  addCredits,
+  isValidPackage,
+  DT_PER_USD,
+} from "../lib/credits"
 
 export const adminApi = new Hono()
 adminApi.use("*", requireAdmin())
@@ -1829,3 +1835,145 @@ adminApi.get("/me", async (c) => {
   const [u] = await withDbResilience(() => sql`SELECT id, email, role FROM users WHERE id = ${session.userId}`)
   return c.json({ user: u })
 })
+
+// ---------------------------------------------------------------------------
+// Admin credit management
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /admin-api/users/:id/credits
+ * Returns the user's current balance + last 100 transactions.
+ */
+adminApi.get("/users/:id/credits", async (c) => {
+  const userId = c.req.param("id")
+  try {
+    // Verify user exists
+    const userRows = await withDbResilience(() => sql`SELECT id, email FROM users WHERE id = ${userId}`)
+    if (userRows.length === 0) return c.json({ error: "user_not_found" }, 404)
+
+    const [balance, transactions] = await Promise.all([
+      getBalance(userId),
+      getTransactionHistory(userId, 100),
+    ])
+
+    return c.json({
+      user: { id: userRows[0].id, email: userRows[0].email },
+      balance,
+      transactions,
+    })
+  } catch (err) {
+    return c.json({ error: "credits_fetch_failed", message: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+/**
+ * POST /admin-api/users/:id/credits/grant
+ * Body: { amount_dt: number, note?: string }
+ * Grants credits to a user and records an admin_grant transaction.
+ */
+adminApi.post("/users/:id/credits/grant", async (c) => {
+  const userId = c.req.param("id")
+  const adminSession = c.var.session
+
+  const body = await c.req.json().catch(() => ({}))
+  const amount_dt = Number(body.amount_dt)
+  const note = typeof body.note === "string" ? body.note.trim().slice(0, 500) : null
+
+  if (!isValidPackage(amount_dt)) {
+    return c.json({
+      error: "invalid_amount",
+      message: `amount_dt must be a multiple of 5, between 5 and 10000. Got: ${amount_dt}`,
+    }, 400)
+  }
+
+  try {
+    // Verify target user exists
+    const userRows = await withDbResilience(() => sql`SELECT id, email FROM users WHERE id = ${userId}`)
+    if (userRows.length === 0) return c.json({ error: "user_not_found" }, 404)
+
+    const result = await addCredits(userId, amount_dt, "admin_grant", "completed", {
+      adminNote: note ?? `Admin grant of ${amount_dt} DT`,
+      createdBy: adminSession.userId,
+    })
+
+    // Audit trail
+    const adminEmail = await actorEmailFor(adminSession.userId)
+    await audit({
+      actorId: adminSession.userId,
+      actorEmail: adminEmail,
+      action: "credits.grant",
+      resource: "user",
+      resourceId: userId,
+      metadata: {
+        amount_dt,
+        note,
+        new_balance_dt: result.new_balance_dt,
+        transaction_id: result.transaction_id,
+      },
+    })
+
+    return c.json({
+      ok: true,
+      transaction_id: result.transaction_id,
+      amount_dt,
+      new_balance_dt: result.new_balance_dt,
+      new_balance_usd_value: Number((result.new_balance_dt / DT_PER_USD).toFixed(4)),
+      user: { id: userRows[0].id, email: userRows[0].email },
+    })
+  } catch (err) {
+    return c.json({ error: "grant_failed", message: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+/**
+ * GET /admin-api/credits/transactions
+ * Global credit ledger — all users, paginated, newest first.
+ * Query params: limit (default 100), offset (default 0)
+ */
+adminApi.get("/credits/transactions", async (c) => {
+  const limit = Math.min(500, Math.max(1, Number(c.req.query("limit") ?? 100)))
+  const offset = Math.max(0, Number(c.req.query("offset") ?? 0))
+
+  try {
+    const rows = await withDbResilience(() => sql`
+      SELECT
+        ct.id,
+        ct.user_id,
+        u.email,
+        ct.amount_dt,
+        ct.type,
+        ct.status,
+        ct.admin_note,
+        ct.payment_ref,
+        ct.created_at,
+        cb.email AS created_by_email
+      FROM credit_transactions ct
+      JOIN users u ON u.id = ct.user_id
+      LEFT JOIN users cb ON cb.id = ct.created_by
+      ORDER BY ct.created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `)
+
+    const [countRow] = await withDbResilience(() => sql`SELECT COUNT(*) AS total FROM credit_transactions`)
+
+    return c.json({
+      transactions: rows.map((r: any) => ({
+        id: r.id,
+        user_id: r.user_id,
+        email: r.email,
+        amount_dt: Number(r.amount_dt),
+        type: r.type,
+        status: r.status,
+        admin_note: r.admin_note ?? null,
+        payment_ref: r.payment_ref ?? null,
+        created_at: r.created_at,
+        created_by_email: r.created_by_email ?? null,
+      })),
+      total: Number(countRow?.total ?? 0),
+      limit,
+      offset,
+    })
+  } catch (err) {
+    return c.json({ error: "fetch_failed", message: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})

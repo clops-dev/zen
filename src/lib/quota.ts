@@ -1,5 +1,27 @@
 import { sql, withDbResilience } from "./db"
 import type { ComplexityTier } from "./db"
+import { hasCredits, getBalance } from "./credits"
+
+// ---------------------------------------------------------------------------
+// Credit-user quota helper
+// ---------------------------------------------------------------------------
+
+export interface CreditQuotaStatus {
+  /** true when the user has a positive credit balance */
+  isCreditUser: boolean
+  balance_dt: number
+}
+
+/**
+ * Quick pre-check for the gateway: if the user has any paid credits, they
+ * bypass the free token-budget system entirely.  Called BEFORE checkQuota.
+ */
+export async function checkCreditQuota(userId: string): Promise<CreditQuotaStatus> {
+  const [creditsUser] = await Promise.all([hasCredits(userId)])
+  if (!creditsUser) return { isCreditUser: false, balance_dt: 0 }
+  const bal = await getBalance(userId)
+  return { isCreditUser: true, balance_dt: bal.balance_dt }
+}
 
 export interface QuotaStatus {
   allowed: boolean

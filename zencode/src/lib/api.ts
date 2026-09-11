@@ -21,6 +21,10 @@ export interface UserProfile {
   used_this_month: number;
   active_key_count: number;
   total_key_count: number;
+  // Credits (added in migration 018)
+  credit_balance_dt: number;
+  credit_balance_usd_value: number;
+  has_credits: boolean;
 }
 
 export interface ApiKey {
@@ -52,6 +56,31 @@ export interface DailyUsage {
   input_tokens: number;
   output_tokens: number;
   cost_usd: number;
+}
+
+export interface CreditBalance {
+  balance_dt: number;
+  balance_usd_value: number;
+  updated_at: string;
+}
+
+export interface CreditTransaction {
+  id: string;
+  amount_dt: number;
+  type: 'purchase' | 'admin_grant' | 'usage' | 'refund' | 'adjustment';
+  status: 'pending' | 'completed' | 'failed' | 'reversed';
+  admin_note: string | null;
+  payment_ref: string | null;
+  created_at: string;
+}
+
+export interface PurchaseIntentResponse {
+  transaction_id: string;
+  amount_dt: number;
+  usd_value: number;
+  status: 'pending';
+  payment_ref: string | null;
+  message: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +140,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // ---------------------------------------------------------------------------
 
 export const api = {
-  /** Fetch the current user's profile + subscription summary. */
+  /** Fetch the current user's profile + subscription summary + credit balance. */
   me(): Promise<UserProfile> {
     return apiFetch<UserProfile>('/user-api/me');
   },
@@ -145,6 +174,27 @@ export const api = {
   /** Per-day usage for the last N days (7–90, default 30). */
   getDailyUsage(days = 30): Promise<DailyUsage[]> {
     return apiFetch<DailyUsage[]>(`/user-api/usage/daily?days=${days}`);
+  },
+
+  /** Current credit balance from the server. */
+  getCredits(): Promise<CreditBalance> {
+    return apiFetch<CreditBalance>('/user-api/credits');
+  },
+
+  /** Last N credit transactions (default 50). */
+  getCreditHistory(limit = 50): Promise<CreditTransaction[]> {
+    return apiFetch<CreditTransaction[]>(`/user-api/credits/history?limit=${limit}`);
+  },
+
+  /**
+   * Create a purchase intent for a DT credit package.
+   * amount_dt must be a positive multiple of 5 (e.g. 5, 10, 20, 50, 100).
+   */
+  purchaseCreditIntent(amount_dt: number): Promise<PurchaseIntentResponse> {
+    return apiFetch<PurchaseIntentResponse>('/user-api/credits/purchase-intent', {
+      method: 'POST',
+      body: JSON.stringify({ amount_dt }),
+    });
   },
 
   /** Clear the session cookie server-side. */

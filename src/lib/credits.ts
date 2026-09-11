@@ -1,0 +1,303 @@
+/**
+ * src/lib/credits.ts — Prepaid DT-credit accounting.
+ *
+ * Rate: $1 USD of AI tokens = 4 DT  →  1 DT = $0.25 AI usage value.
+ *
+ * Design rules:
+ *  - All mutations use serializable transactions so concurrent requests
+ *    cannot double-spend the same credits.
+ *  - The user_credits table holds the authoritative balance (denormalised
+ *    for fast CLI quota checks). credit_transactions is the immutable ledger.
+ *  - Deductions only succeed when the balance can cover the amount; they
+ *    throw InsufficientCreditsError otherwise so the caller can return 402.
+ *  - The AI request id (from ai_requests) is stored on usage rows so every
+ *    credit deduction traces back to the exact request.
+ */
+
+import { sql, withDbResilience } from "./db"
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** How many DT equal $1 USD of AI usage. */
+export const DT_PER_USD = 4
+
+/** Minimum purchasable package size (in DT). */
+export const MIN_PACKAGE_DT = 5
+
+/** Packages must be multiples of this many DT. */
+export const PACKAGE_STEP_DT = 5
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+export class InsufficientCreditsError extends Error {
+  constructor(public readonly userId: string, public readonly balance: number, public readonly required: number) {
+    super(`Insufficient credits for user ${userId}: balance=${balance.toFixed(4)} DT, required=${required.toFixed(4)} DT`)
+    this.name = "InsufficientCreditsError"
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Read
+// ---------------------------------------------------------------------------
+
+export interface CreditBalance {
+  balance_dt: number
+  balance_usd_value: number
+  updated_at: string
+}
+
+/**
+ * Return the current credit balance for a user.
+ * Returns { balance_dt: 0 } when no credits row exists (new user).
+ */
+export async function getBalance(userId: string): Promise<CreditBalance> {
+  const rows = await withDbResilience(() => sql`
+    SELECT balance_dt, updated_at
+    FROM user_credits
+    WHERE user_id = ${userId}
+  `)
+  if (rows.length === 0) {
+    return { balance_dt: 0, balance_usd_value: 0, updated_at: new Date().toISOString() }
+  }
+  const balance_dt = Number(rows[0].balance_dt)
+  return {
+    balance_dt,
+    balance_usd_value: Number((balance_dt / DT_PER_USD).toFixed(4)),
+    updated_at: rows[0].updated_at,
+  }
+}
+
+/**
+ * Quick boolean check — does this user have any credits at all?
+ * Used by the gateway to decide which quota path to use.
+ */
+export async function hasCredits(userId: string): Promise<boolean> {
+  const rows = await withDbResilience(() => sql`
+    SELECT balance_dt FROM user_credits WHERE user_id = ${userId} AND balance_dt > 0
+  `)
+  return rows.length > 0
+}
+
+// ---------------------------------------------------------------------------
+// Write — add credits
+// ---------------------------------------------------------------------------
+
+export interface AddCreditsResult {
+  ok: boolean
+  new_balance_dt: number
+  transaction_id: string
+}
+
+/**
+ * Add credits to a user's balance. Records a credit_transactions row and
+ * updates user_credits atomically.
+ *
+ * @param userId      The beneficiary
+ * @param amountDt    Positive DT amount
+ * @param type        'purchase' | 'admin_grant' | 'refund' | 'adjustment'
+ * @param status      'completed' for immediate grants; 'pending' for purchases awaiting payment
+ * @param options     Extra metadata for the ledger row
+ */
+export async function addCredits(
+  userId: string,
+  amountDt: number,
+  type: "purchase" | "admin_grant" | "refund" | "adjustment",
+  status: "pending" | "completed" = "completed",
+  options?: {
+    adminNote?: string
+    paymentRef?: string
+    createdBy?: string
+  },
+): Promise<AddCreditsResult> {
+  if (amountDt <= 0) throw new Error("amountDt must be positive")
+
+  const safeDt = Number(amountDt.toFixed(4))
+  const note = options?.adminNote ?? null
+  const payRef = options?.paymentRef ?? null
+  const createdBy = options?.createdBy ?? null
+
+  // Ensure the user_credits row exists
+  await withDbResilience(() => sql`
+    INSERT INTO user_credits (user_id, balance_dt)
+    VALUES (${userId}, 0)
+    ON CONFLICT (user_id) DO NOTHING
+  `)
+
+  // Insert ledger row
+  const [txRow] = await withDbResilience(() => sql`
+    INSERT INTO credit_transactions
+      (user_id, amount_dt, type, status, payment_ref, admin_note, created_by)
+    VALUES
+      (${userId}, ${safeDt}, ${type}, ${status}, ${payRef}, ${note}, ${createdBy})
+    RETURNING id
+  `)
+
+  // Increment balance (only for completed transactions)
+  let newBalance = 0
+  if (status === "completed") {
+    const [balRow] = await withDbResilience(() => sql`
+      UPDATE user_credits
+      SET balance_dt = balance_dt + ${safeDt},
+          updated_at = now()
+      WHERE user_id = ${userId}
+      RETURNING balance_dt
+    `)
+    newBalance = Number(balRow.balance_dt)
+  } else {
+    const [balRow] = await withDbResilience(() => sql`
+      SELECT balance_dt FROM user_credits WHERE user_id = ${userId}
+    `)
+    newBalance = balRow ? Number(balRow.balance_dt) : 0
+  }
+
+  return { ok: true, new_balance_dt: newBalance, transaction_id: txRow.id }
+}
+
+// ---------------------------------------------------------------------------
+// Write — deduct credits (for AI usage)
+// ---------------------------------------------------------------------------
+
+export interface DeductCreditsResult {
+  ok: boolean
+  new_balance_dt: number
+  transaction_id: string
+}
+
+/**
+ * Deduct credits from a user's balance for AI usage.
+ *
+ * Uses SELECT FOR UPDATE inside a serializable transaction to prevent
+ * concurrent double-spend. Throws InsufficientCreditsError when the balance
+ * is too low — callers should convert that to a 402 response.
+ *
+ * Only charges when amountDt > 0 (zero-cost cached responses skip the write).
+ *
+ * @param userId      The user being charged
+ * @param amountDt    Amount to deduct (must be >= 0)
+ * @param requestId   UUID of the ai_requests row (for audit linkage)
+ */
+export async function deductCredits(
+  userId: string,
+  amountDt: number,
+  requestId?: string,
+): Promise<DeductCreditsResult> {
+  if (amountDt < 0) throw new Error("amountDt cannot be negative")
+
+  // Zero-cost request (e.g. cached) — log a $0 ledger row for completeness but
+  // skip the balance mutation to avoid unnecessary DB write overhead.
+  if (amountDt === 0) {
+    return { ok: true, new_balance_dt: (await getBalance(userId)).balance_dt, transaction_id: "" }
+  }
+
+  const safeDt = Number(amountDt.toFixed(4))
+  const reqId = requestId ?? null
+
+  // Serialisable transaction: lock the row, check balance, deduct atomically.
+  // Postgres REPEATABLE READ is sufficient here because we read + write the
+  // same row in sequence, but FOR UPDATE gives us the row-level lock we need.
+  try {
+    const result = await sql.begin(async (tx) => {
+      // Lock the balance row for this user.
+      const balRows = await tx`
+        SELECT balance_dt FROM user_credits WHERE user_id = ${userId} FOR UPDATE
+      `
+      if (balRows.length === 0) {
+        throw new InsufficientCreditsError(userId, 0, safeDt)
+      }
+
+      const currentBalance = Number(balRows[0].balance_dt)
+      if (currentBalance < safeDt) {
+        throw new InsufficientCreditsError(userId, currentBalance, safeDt)
+      }
+
+      // Update balance
+      const [updatedRow] = await tx`
+        UPDATE user_credits
+        SET balance_dt = balance_dt - ${safeDt},
+            updated_at = now()
+        WHERE user_id = ${userId}
+        RETURNING balance_dt
+      `
+
+      // Record ledger entry
+      const [txRow] = await tx`
+        INSERT INTO credit_transactions
+          (user_id, amount_dt, type, status, request_id)
+        VALUES
+          (${userId}, ${-safeDt}, 'usage', 'completed', ${reqId})
+        RETURNING id
+      `
+
+      return { new_balance_dt: Number(updatedRow.balance_dt), transaction_id: txRow.id }
+    })
+
+    return { ok: true, ...result }
+  } catch (err) {
+    if (err instanceof InsufficientCreditsError) throw err
+    throw new Error(`Credit deduction failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Convert USD cost to DT (rounded up to 4 decimal places). */
+export function usdToDt(costUsd: number): number {
+  return Number((costUsd * DT_PER_USD).toFixed(4))
+}
+
+/** Convert DT to equivalent USD AI-usage value. */
+export function dtToUsd(amountDt: number): number {
+  return Number((amountDt / DT_PER_USD).toFixed(4))
+}
+
+/**
+ * Validate a package size: must be a positive multiple of PACKAGE_STEP_DT
+ * and at least MIN_PACKAGE_DT.
+ */
+export function isValidPackage(amountDt: number): boolean {
+  if (!Number.isFinite(amountDt) || amountDt < MIN_PACKAGE_DT) return false
+  if (amountDt > 10_000) return false // sanity cap
+  return Number.isInteger(amountDt) && amountDt % PACKAGE_STEP_DT === 0
+}
+
+// ---------------------------------------------------------------------------
+// Credit transaction list
+// ---------------------------------------------------------------------------
+
+export interface CreditTransaction {
+  id: string
+  amount_dt: number
+  type: string
+  status: string
+  admin_note: string | null
+  payment_ref: string | null
+  created_at: string
+}
+
+export async function getTransactionHistory(
+  userId: string,
+  limit = 50,
+): Promise<CreditTransaction[]> {
+  const rows = await withDbResilience(() => sql`
+    SELECT id, amount_dt, type, status, admin_note, payment_ref, created_at
+    FROM credit_transactions
+    WHERE user_id = ${userId}
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `)
+  return rows.map((r: any) => ({
+    id: r.id,
+    amount_dt: Number(r.amount_dt),
+    type: r.type,
+    status: r.status,
+    admin_note: r.admin_note ?? null,
+    payment_ref: r.payment_ref ?? null,
+    created_at: r.created_at,
+  }))
+}

@@ -44,6 +44,9 @@ export type AuditAction =
   | "api_key.create"
   | "api_key.revoke"
   | "api_key.rotate"
+  // credits
+  | "credits.grant"
+  | "credits.adjustment"
   // system
   | "system.bootstrap"
   | "system.migration_applied"

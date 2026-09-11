@@ -8,6 +8,8 @@ import { pickRoute, reportRouteOutcome, type RouteTarget, ContextWindowExceededE
 import { callNonStreaming, callStreaming, classifyProviderError } from "../lib/ai-call"
 import { UpstreamTimeoutError } from "../lib/ai-call"
 import { checkQuota, recordUsage } from "../lib/quota"
+import { checkCreditQuota } from "../lib/quota"
+import { deductCredits, usdToDt, InsufficientCreditsError } from "../lib/credits"
 import { hashPrompt, getCached, setCached } from "../lib/cache"
 import { calcCost } from "../lib/pricing"
 import { countInputTokens } from "../lib/tokens"
@@ -229,7 +231,32 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   const { messages, stream, max_tokens, temperature, tools, tool_choice } = parsed.data
   const maxOutputTokens = max_tokens ?? 16384
 
-  const quota = await checkQuota(user.id)
+  // ---------------------------------------------------------------------------
+  // Quota / credit check
+  // ---------------------------------------------------------------------------
+  //
+  // Two distinct paths:
+  //   1. Credit user  — has purchased/been granted DT credits. Bypasses the
+  //                     free token-budget system entirely. Blocked only when
+  //                     their credit balance is insufficient for this request.
+  //   2. Free user    — no credit balance. Subject to the existing monthly
+  //                     token-budget quota system (unchanged behaviour).
+
+  const creditStatus = await checkCreditQuota(user.id)
+
+  // quota is used later for complexity-tier routing (maxComplexityTier);
+  // for credit users we still need the suspension/existence check but
+  // NOT the budget check.
+  const quota = creditStatus.isCreditUser
+    ? await checkQuota(user.id).then(q => {
+        // For credit users, only honour suspension — ignore budget
+        if (!q.allowed && q.reason === "suspended") return q
+        if (!q.allowed && q.reason === "no_subscription") return q
+        // Otherwise allow, with full complexity routing
+        return { allowed: true, maxComplexityTier: "complex" as const }
+      })
+    : await checkQuota(user.id)
+
   if (!quota.allowed) {
     bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: quota.reason, requestId: reqId }))
     let statusCode = 401
@@ -239,10 +266,13 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       message = "Your spending limit has been reached. Please contact an administrator."
     } else if (quota.reason === "quota_exceeded") {
       statusCode = 402
-      message = "Your account ran out of credits."
+      message = "Your free usage quota has been reached for this month. Purchase AI credits to continue."
     } else if (quota.reason === "suspended") {
       statusCode = 403
       message = "Your account is suspended — contact support."
+    } else if (quota.reason === "no_subscription") {
+      statusCode = 402
+      message = "Your account has no active quota. Purchase AI credits to get started."
     }
 
     const errorBody = {
@@ -259,6 +289,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
     }
     return c.json(errorBody, statusCode as any)
   }
+
 
   const complexity = classifyComplexity(messages as any)
 
@@ -366,11 +397,22 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
 
           bg(reportRouteOutcome(target.providerId, true))
           bg(recordUsage(user.id, result.inputTokens, result.outputTokens, cost))
+          const requestRowId = reqId
           bg(recordRequest({
             userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
             inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
             latencyMs, status: "success",
           }))
+          // Deduct from credit balance if this is a credit user.
+          if (creditStatus.isCreditUser && cost > 0) {
+            bg(deductCredits(user.id, usdToDt(cost), requestRowId).catch((err) => {
+              if (err instanceof InsufficientCreditsError) {
+                console.warn(`[gateway] credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
+              } else {
+                console.error("[gateway] credit deduction error:", err)
+              }
+            }))
+          }
           bg(setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens))
 
           console.log(`[gateway] non-stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} latencyMs=${latencyMs} tokens=${result.inputTokens}+${result.outputTokens} status=success`)
@@ -546,6 +588,18 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
             latencyMs, status: "success", requestId: reqId,
           })
+          // Deduct from credit balance if this is a credit user.
+          if (creditStatus.isCreditUser && cost > 0) {
+            try {
+              await deductCredits(user.id, usdToDt(cost), reqId)
+            } catch (err) {
+              if (err instanceof InsufficientCreditsError) {
+                console.warn(`[gateway] stream credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
+              } else {
+                console.error("[gateway] stream credit deduction error:", err)
+              }
+            }
+          }
           await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
         } catch (err) {
           const isClientCancel =

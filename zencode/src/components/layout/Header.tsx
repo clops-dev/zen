@@ -1,4 +1,5 @@
 import { Menu, Bell, Search } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
 
 interface HeaderProps {
   onMenuClick: () => void;
@@ -7,6 +8,12 @@ interface HeaderProps {
 }
 
 export const Header = ({ onMenuClick, title, subtitle }: HeaderProps) => {
+  const { user } = useAuth();
+
+  const initials = user?.email
+    ? user.email.slice(0, 2).toUpperCase()
+    : 'ZC';
+
   return (
     <header className="sticky top-0 z-30 bg-bg/80 backdrop-blur-sm border-b border-border">
       <div className="h-14 px-4 lg:px-6 flex items-center justify-between gap-4">
@@ -44,14 +51,29 @@ export const Header = ({ onMenuClick, title, subtitle }: HeaderProps) => {
               ⌘K
             </kbd>
           </div>
+
           <button className="relative p-2 text-fg-muted hover:text-fg transition-colors">
             <Bell size={16} />
             <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-brand rounded-full" />
           </button>
+
           <div className="hidden sm:flex items-center gap-2 pl-3 ml-1 border-l border-border">
-            <div className="w-7 h-7 bg-brand/20 border border-brand/30 rounded-sm flex items-center justify-center text-[10px] font-bold text-brand">
-              DE
-            </div>
+            {/* Real user avatar or fallback initials */}
+            {user?.avatar_url ? (
+              <img
+                src={user.avatar_url}
+                alt={user.email ?? 'User'}
+                className="w-7 h-7 rounded-sm object-cover"
+                title={user.email ?? undefined}
+              />
+            ) : (
+              <div
+                className="w-7 h-7 bg-brand/20 border border-brand/30 rounded-sm flex items-center justify-center text-[10px] font-bold text-brand"
+                title={user?.email ?? undefined}
+              >
+                {initials}
+              </div>
+            )}
           </div>
         </div>
       </div>

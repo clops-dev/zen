@@ -11,10 +11,15 @@ import {
   GitFork,
   ExternalLink,
   Mail,
+  LogOut,
+  LayoutDashboard,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { useAuth } from '@/hooks/useAuth';
+
+// $1 USD of AI = 4 DT
+const DT_PER_USD = 4;
 
 const features = [
   {
@@ -56,45 +61,18 @@ const demoSteps = [
   { prompt: 'zencode test --generate', output: 'Generated 12 test cases. Coverage: 94%' },
 ];
 
-const pricing = [
-  {
-    name: 'Developer',
-    price: 0,
-    period: '/month',
-    features: ['Unlimited personal use', 'All models', 'CLI access', 'Community support'],
-    cta: 'Start Free',
-    popular: false,
-  },
-  {
-    name: 'Pro',
-    price: 20,
-    period: '/month',
-    features: [
-      'Everything in Developer',
-      'Team workspaces (up to 10)',
-      'Shared prompt library',
-      'Priority support',
-      'Usage analytics',
-    ],
-    cta: 'Get Pro',
-    popular: true,
-  },
-  {
-    name: 'Enterprise',
-    price: 99,
-    period: '/month',
-    features: [
-      'Everything in Pro',
-      'Unlimited team members',
-      'SSO / SAML',
-      'Custom model deployment',
-      'SLA & dedicated support',
-      'On-premise option',
-    ],
-    cta: 'Contact Sales',
-    popular: false,
-  },
+// Credit packages — all multiples of 5 DT, $1 = 4 DT
+const creditPackages = [
+  { dt: 5,   recommended: false },
+  { dt: 10,  recommended: false },
+  { dt: 20,  recommended: true  },
+  { dt: 50,  recommended: false },
+  { dt: 100, recommended: false },
 ];
+
+function dtToUsdValue(dt: number) {
+  return (dt / DT_PER_USD).toFixed(2);
+}
 
 const stats = [
   { value: '50K+', label: 'Developers' },
@@ -104,6 +82,9 @@ const stats = [
 ];
 
 export const LandingPage = () => {
+  const { user, logout } = useAuth();
+  const isAuthenticated = !!user;
+
   return (
     <div className="min-h-screen bg-bg text-fg font-mono">
       {/* Navigation */}
@@ -125,22 +106,61 @@ export const LandingPage = () => {
           </Link>
 
           <div className="hidden md:flex items-center gap-6">
-            <Link to="#features" className="text-xs font-bold uppercase tracking-wider text-fg-muted hover:text-fg transition-colors">Features</Link>
-            <Link to="#demo" className="text-xs font-bold uppercase tracking-wider text-fg-muted hover:text-fg transition-colors">Demo</Link>
-            <Link to="#pricing" className="text-xs font-bold uppercase tracking-wider text-fg-muted hover:text-fg transition-colors">Pricing</Link>
-            <Link to="#docs" className="text-xs font-bold uppercase tracking-wider text-fg-muted hover:text-fg transition-colors">Docs</Link>
+            <a href="#features" className="text-xs font-bold uppercase tracking-wider text-fg-muted hover:text-fg transition-colors">Features</a>
+            {isAuthenticated ? (
+              <Link to="/app/credits" className="text-xs font-bold uppercase tracking-wider text-fg-muted hover:text-fg transition-colors">Credits</Link>
+            ) : (
+              <a href="#pricing" className="text-xs font-bold uppercase tracking-wider text-fg-muted hover:text-fg transition-colors">Pricing</a>
+            )}
+            <a href="#demo" className="text-xs font-bold uppercase tracking-wider text-fg-muted hover:text-fg transition-colors">Demo</a>
           </div>
 
           <div className="flex items-center gap-3">
-            <Link to="/docs/getting-started" className="hidden sm:block px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider border border-border hover:border-brand/40 hover:bg-brand/10 rounded btn-press">
-              Documentation
-            </Link>
-            <Link to="/login" className="px-4 py-2 bg-brand text-black text-xs font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press">
-              Sign In
-            </Link>
-            <Link to="/login" className="px-4 py-2 bg-brand text-black text-xs font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press">
-              Get Started Free
-            </Link>
+            {isAuthenticated ? (
+              <>
+                {/* Authenticated nav */}
+                <Link
+                  to="/app/dashboard"
+                  className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider border border-border hover:border-brand/40 hover:bg-brand/10 rounded btn-press"
+                >
+                  <LayoutDashboard size={12} />
+                  Dashboard
+                </Link>
+                <div className="hidden sm:flex items-center gap-2 pl-3 border-l border-border">
+                  {user.avatar_url ? (
+                    <img src={user.avatar_url} alt="" className="w-7 h-7 rounded-sm object-cover" />
+                  ) : (
+                    <div className="w-7 h-7 bg-brand/20 border border-brand/30 rounded-sm flex items-center justify-center text-[10px] font-bold text-brand">
+                      {user.email?.[0]?.toUpperCase() ?? 'U'}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={logout}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-fg-muted hover:text-brand hover:bg-bg-card rounded border border-transparent hover:border-border transition-all btn-press"
+                  title="Log out"
+                >
+                  <LogOut size={12} />
+                  <span className="hidden sm:inline">Logout</span>
+                </button>
+              </>
+            ) : (
+              <>
+                {/* Signed-out nav */}
+                <Link
+                  to="/login"
+                  className="hidden sm:block px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider border border-border hover:border-brand/40 hover:bg-brand/10 rounded btn-press"
+                >
+                  Sign In
+                </Link>
+                <Link
+                  to="/login"
+                  className="px-4 py-2 bg-brand text-black text-xs font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press"
+                >
+                  Get Started Free
+                </Link>
+              </>
+            )}
           </div>
         </div>
       </nav>
@@ -164,11 +184,17 @@ export const LandingPage = () => {
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
-            <Link to="/login" className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 bg-brand text-black text-xs font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press">
-              Start Free
+            <Link
+              to={isAuthenticated ? '/app/dashboard' : '/login'}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 bg-brand text-black text-xs font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press"
+            >
+              {isAuthenticated ? 'Open Dashboard' : 'Start Free'}
               <ArrowRight size={14} />
             </Link>
-            <Link to="/docs/getting-started" className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 border border-border text-xs font-bold uppercase tracking-wider rounded hover:border-brand/40 hover:bg-brand/10 btn-press">
+            <Link
+              to="/docs/getting-started"
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 border border-border text-xs font-bold uppercase tracking-wider rounded hover:border-brand/40 hover:bg-brand/10 btn-press"
+            >
               Read Docs
             </Link>
           </div>
@@ -310,64 +336,119 @@ and attaches the user to the request context.`}
         </div>
       </section>
 
-      {/* Pricing */}
+      {/* Pricing — Credit Packages */}
       <section id="pricing" className="py-20 lg:py-28 px-4 lg:px-6">
         <div className="max-w-7xl mx-auto">
           <div className="text-center mb-16">
             <div className="inline-flex items-center gap-2 px-3 py-1 bg-brand/10 border border-brand/30 rounded-full mb-4">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-brand">PRICING</span>
+              <span className="text-[10px] font-bold uppercase tracking-widest text-brand">AI CREDITS</span>
             </div>
             <h2 className="text-3xl lg:text-4xl font-bold tracking-tight mb-4">
-              Simple, <span className="text-brand">Transparent</span> Pricing
+              Pay Only for What <span className="text-brand">You Actually Use</span>
             </h2>
             <p className="text-lg text-fg-muted max-w-2xl mx-auto">
-              No hidden fees. No per-token surprises. Pay for value, not volume.
+              No subscriptions. No recurring charges. Buy DT credits — they represent real AI usage value.
+              Use them whenever you want, for as long as you want.
             </p>
           </div>
 
-          <div className="grid md:grid-cols-3 gap-6 max-w-5xl mx-auto">
-            {pricing.map((p, i) => (
+          {/* Rate explainer */}
+          <div className="max-w-2xl mx-auto mb-12">
+            <Card accent className="p-5 text-center scanlines">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-fg-muted mb-3">Exchange Rate</div>
+              <div className="flex items-center justify-center gap-4 text-sm font-mono">
+                <div>
+                  <div className="text-3xl font-bold text-brand">1 DT</div>
+                  <div className="text-[10px] uppercase tracking-wider text-fg-muted mt-1">Zencode Credits</div>
+                </div>
+                <div className="text-fg-muted text-xl">=</div>
+                <div>
+                  <div className="text-3xl font-bold">$0.25</div>
+                  <div className="text-[10px] uppercase tracking-wider text-fg-muted mt-1">AI Usage Value</div>
+                </div>
+              </div>
+              <p className="text-[11px] text-fg-subtle mt-4">
+                Credits represent prepaid AI API usage. They are not withdrawable cash. 
+                They do not expire while your account is active.
+              </p>
+            </Card>
+          </div>
+
+          {/* Package grid */}
+          <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-4 max-w-5xl mx-auto">
+            {creditPackages.map((pkg) => (
               <Card
-                key={i}
-                accent={p.popular}
-                className={`p-6 flex flex-col ${p.popular ? 'relative' : ''}`}
+                key={pkg.dt}
+                accent={pkg.recommended}
+                className={`p-5 flex flex-col relative ${pkg.recommended ? 'lg:scale-[1.04]' : ''}`}
               >
-                {p.popular && (
+                {pkg.recommended && (
                   <div className="absolute -top-3 left-1/2 -translate-x-1/2">
-                    <Badge variant="brand" className="text-[10px]">Most Popular</Badge>
+                    <Badge variant="brand" className="text-[9px] whitespace-nowrap">Best Value</Badge>
                   </div>
                 )}
-                <div className="mb-6">
-                  <h3 className="text-lg font-bold mb-2">{p.name}</h3>
-                  <div className="flex items-baseline gap-1">
-                    <span className="text-4xl font-bold">${p.price}</span>
-                    <span className="text-fg-muted">{p.period}</span>
+
+                <div className="text-center mb-4">
+                  <div className="text-4xl font-bold mb-1">{pkg.dt}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-brand font-bold">DT</div>
+                </div>
+
+                <div className="flex-1 mb-4">
+                  <div className="bg-bg-subtle border border-border rounded p-3 text-center">
+                    <div className="text-[10px] uppercase tracking-wider text-fg-muted mb-1">AI Usage Value</div>
+                    <div className="text-xl font-bold text-brand">${dtToUsdValue(pkg.dt)}</div>
                   </div>
                 </div>
-                <ul className="space-y-3 mb-6 flex-1">
-                  {p.features.map((f, j) => (
-                    <li key={j} className="flex items-start gap-2 text-sm">
-                      <Check size={14} className="text-brand shrink-0 mt-0.5" />
-                      <span className="text-fg-muted">{f}</span>
-                    </li>
-                  ))}
+
+                <ul className="space-y-1.5 mb-5 text-[11px] text-fg-muted">
+                  <li className="flex items-center gap-1.5"><Check size={10} className="text-brand" /> No expiry</li>
+                  <li className="flex items-center gap-1.5"><Check size={10} className="text-brand" /> All models</li>
+                  <li className="flex items-center gap-1.5"><Check size={10} className="text-brand" /> CLI ready</li>
                 </ul>
+
                 <Link
-                  to="/login"
-                  className={`w-full text-center px-4 py-2 text-xs font-bold uppercase tracking-wider rounded btn-press ${
-                    p.popular
+                  to={isAuthenticated ? '/app/credits' : '/login'}
+                  className={`w-full text-center px-3 py-2 text-[11px] font-bold uppercase tracking-wider rounded btn-press ${
+                    pkg.recommended
                       ? 'bg-brand text-black hover:bg-brand-hover'
                       : 'border border-border hover:border-brand/40 hover:bg-brand/10'
                   }`}
                 >
-                  {p.cta}
+                  {isAuthenticated ? `Buy ${pkg.dt} DT` : 'Get Started'}
                 </Link>
               </Card>
             ))}
           </div>
 
-          <div className="text-center mt-12 text-xs text-fg-subtle uppercase tracking-wider">
-            All plans include 14-day free trial. No credit card required.
+          <div className="text-center mt-8 space-y-2">
+            <p className="text-xs text-fg-subtle uppercase tracking-wider">
+              Credits are purchased in multiples of 5 DT · Minimum purchase: 5 DT
+            </p>
+            <p className="text-xs text-fg-subtle">
+              Need more? Custom packages available — contact us.
+            </p>
+          </div>
+
+          {/* How it works */}
+          <div className="mt-16 max-w-3xl mx-auto">
+            <div className="text-center mb-8">
+              <div className="text-xs font-bold uppercase tracking-wider text-fg-muted">How Credits Work</div>
+            </div>
+            <div className="grid sm:grid-cols-3 gap-6">
+              {[
+                { step: '01', title: 'Buy Credits', desc: 'Purchase a DT credit package. Credits are added to your account instantly.' },
+                { step: '02', title: 'Use Zencode CLI', desc: 'Run zencode commands normally. Each AI request consumes a small amount of your credits.' },
+                { step: '03', title: 'Track Usage', desc: 'View your balance and transaction history in your dashboard at any time.' },
+              ].map((item) => (
+                <div key={item.step} className="text-center">
+                  <div className="w-12 h-12 bg-brand/10 border border-brand/30 rounded mx-auto mb-3 flex items-center justify-center">
+                    <span className="text-[10px] font-bold text-brand">{item.step}</span>
+                  </div>
+                  <div className="text-sm font-bold mb-2">{item.title}</div>
+                  <p className="text-xs text-fg-muted leading-relaxed">{item.desc}</p>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </section>
@@ -399,11 +480,17 @@ and attaches the user to the request context.`}
             Join 50,000+ developers who've made Zencode their daily driver.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <Link to="/login" className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3 bg-brand text-black text-xs font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press">
-              Start Free Today
+            <Link
+              to={isAuthenticated ? '/app/dashboard' : '/login'}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3 bg-brand text-black text-xs font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press"
+            >
+              {isAuthenticated ? 'Open Dashboard' : 'Start Free Today'}
               <ArrowRight size={14} />
             </Link>
-            <Link to="/docs/getting-started" className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3 border border-border text-xs font-bold uppercase tracking-wider rounded hover:border-brand/40 hover:bg-brand/10 btn-press">
+            <Link
+              to="/docs/getting-started"
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3 border border-border text-xs font-bold uppercase tracking-wider rounded hover:border-brand/40 hover:bg-brand/10 btn-press"
+            >
               Read Documentation
             </Link>
           </div>
@@ -437,22 +524,11 @@ and attaches the user to the request context.`}
             <div>
               <h4 className="text-xs font-bold uppercase tracking-wider mb-4">Product</h4>
               <ul className="space-y-2 text-sm text-fg-muted">
-                <li><Link to="#features" className="hover:text-brand transition-colors">Features</Link></li>
-                <li><Link to="#pricing" className="hover:text-brand transition-colors">Pricing</Link></li>
+                <li><a href="#features" className="hover:text-brand transition-colors">Features</a></li>
+                <li><a href="#pricing" className="hover:text-brand transition-colors">Pricing</a></li>
                 <li><Link to="/docs/getting-started" className="hover:text-brand transition-colors">Documentation</Link></li>
-                <li><Link to="/cli" className="hover:text-brand transition-colors">CLI Reference</Link></li>
-                <li><Link to="/models" className="hover:text-brand transition-colors">Models</Link></li>
-              </ul>
-            </div>
-
-            <div>
-              <h4 className="text-xs font-bold uppercase tracking-wider mb-4">Company</h4>
-              <ul className="space-y-2 text-sm text-fg-muted">
-                <li><a href="#" className="hover:text-brand transition-colors">About</a></li>
-                <li><a href="#" className="hover:text-brand transition-colors">Blog</a></li>
-                <li><a href="#" className="hover:text-brand transition-colors">Careers</a></li>
-                <li><a href="#" className="hover:text-brand transition-colors">Press</a></li>
-                <li><a href="#" className="hover:text-brand transition-colors">Contact</a></li>
+                <li><Link to="/app/cli" className="hover:text-brand transition-colors">CLI Reference</Link></li>
+                <li><Link to="/app/models" className="hover:text-brand transition-colors">Models</Link></li>
               </ul>
             </div>
 

@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { Activity, Coins, Key, Zap, Plus, Download, Box, BookOpen, ArrowUpRight } from 'lucide-react';
+import { Activity, Coins, Key, Zap, Plus, Download, Box, BookOpen, ArrowUpRight, ShoppingCart } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { mockActivities } from '@/data/mockData';
@@ -8,6 +8,8 @@ import { useAuth } from '@/hooks/useAuth';
 import { useState } from 'react';
 
 type Range = '7' | '30' | '90';
+
+const DT_PER_USD = 4;
 
 const generateUsageData = (range: Range) => {
   const days = range === '7' ? 7 : range === '30' ? 30 : 90;
@@ -35,6 +37,10 @@ export const DashboardPage = () => {
   const usageData = generateUsageData(range);
   const max = Math.max(...usageData.map((d) => d.value));
 
+  const creditBalance = user?.credit_balance_dt ?? 0;
+  const creditUsdValue = user?.credit_balance_usd_value ?? 0;
+  const hasCredits = user?.has_credits ?? false;
+
   const stats: {
     label: string;
     value: string;
@@ -58,11 +64,13 @@ export const DashboardPage = () => {
       color: 'text-brand',
     },
     {
-      label: 'Current Plan',
-      value: (user?.tier ?? 'free').toUpperCase(),
-      subtext: user?.status === 'suspended' ? 'Suspended' : 'Active',
+      label: 'Credit Balance',
+      value: `${creditBalance.toFixed(1)} DT`,
+      subtext: hasCredits
+        ? `$${creditUsdValue.toFixed(2)} AI usage value`
+        : 'Free tier · buy credits',
       icon: Zap,
-      color: 'text-brand',
+      color: hasCredits ? 'text-brand' : 'text-fg-muted',
     },
     {
       label: 'API Keys',
@@ -76,6 +84,7 @@ export const DashboardPage = () => {
   const quickActions = [
     { label: 'Create API Key', icon: Plus, to: '/app/api-keys' },
     { label: 'Download CLI', icon: Download, to: '/app/cli' },
+    { label: 'Buy Credits', icon: ShoppingCart, to: '/app/credits' },
     { label: 'Explore Models', icon: Box, to: '/app/models' },
     { label: 'Documentation', icon: BookOpen, to: '/app/docs' },
   ];
@@ -95,6 +104,25 @@ export const DashboardPage = () => {
           Your Zencode environment is ready.
         </p>
       </div>
+
+      {/* Credit status banner for users with low/no credits */}
+      {!hasCredits && (
+        <div className="flex items-center gap-3 px-4 py-3 bg-brand/5 border border-brand/20 rounded-md">
+          <Zap size={14} className="text-brand shrink-0" />
+          <div className="flex-1 min-w-0">
+            <span className="text-xs text-fg-muted">
+              You're on the free tier. 
+              <span className="text-fg ml-1">Purchase AI credits to unlock unlimited usage.</span>
+            </span>
+          </div>
+          <Link
+            to="/app/credits"
+            className="shrink-0 px-3 py-1 bg-brand text-black text-[10px] font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press"
+          >
+            Buy Credits
+          </Link>
+        </div>
+      )}
 
       {/* Stats Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4">
@@ -142,22 +170,24 @@ export const DashboardPage = () => {
               <span>v7.3.58</span>
             </div>
             <div className="flex justify-between border-b border-border/30 pb-2">
-              <span className="text-fg-muted">Environment</span>
-              <span>Production</span>
+              <span className="text-fg-muted">Account</span>
+              <span className="truncate max-w-[120px]">{user?.email?.split('@')[0] ?? '—'}</span>
             </div>
             <div className="flex justify-between border-b border-border/30 pb-2">
-              <span className="text-fg-muted">Status</span>
-              <span className="text-brand">Connected</span>
+              <span className="text-fg-muted">Credits</span>
+              <span className={hasCredits ? 'text-brand' : 'text-fg-muted'}>
+                {hasCredits ? `${creditBalance.toFixed(1)} DT` : 'Free tier'}
+              </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-fg-muted">Last Sync</span>
-              <span>Just now</span>
+              <span className="text-fg-muted">Status</span>
+              <span className="text-brand">Connected</span>
             </div>
           </div>
 
           <div className="mt-5">
             <Link
-              to="/cli"
+              to="/app/cli"
               className="block w-full text-center px-4 py-2 bg-brand/10 hover:bg-brand/20 border border-brand/40 text-xs font-bold uppercase tracking-wider rounded transition-colors btn-press"
             >
               [ Manage CLI ]

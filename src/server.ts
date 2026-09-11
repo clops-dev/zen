@@ -74,7 +74,7 @@ app.get("/healthz", async (c) => {
   }, ok ? 200 : 503)
 })
 
-app.get("/", (c) => c.redirect("/login", 303))
+app.get("/", (c) => c.redirect("/zencode", 303))
 
 app.onError((err, c) => {
   log.error("unhandled_error", { request_id: c.get("requestId"), path: c.req.path }, err)

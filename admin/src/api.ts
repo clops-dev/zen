@@ -328,3 +328,65 @@ export const listAudit = (q: Record<string, string | number | undefined>) => {
 export const walletSummary = () => request<WalletSummary>("/admin-api/wallet/summary")
 
 export const settings = () => request<any>("/admin-api/settings")
+
+// ---------------------------------------------------------------------------
+// Admin credit management
+// ---------------------------------------------------------------------------
+
+export type AdminCreditBalance = {
+  balance_dt: number
+  balance_usd_value: number
+  updated_at: string
+}
+
+export type AdminCreditTransaction = {
+  id: string
+  user_id: string
+  email: string
+  amount_dt: number
+  type: 'purchase' | 'admin_grant' | 'usage' | 'refund' | 'adjustment'
+  status: 'pending' | 'completed' | 'failed' | 'reversed'
+  admin_note: string | null
+  payment_ref: string | null
+  created_at: string
+  created_by_email: string | null
+}
+
+export type UserCreditsResponse = {
+  user: { id: string; email: string }
+  balance: AdminCreditBalance
+  transactions: AdminCreditTransaction[]
+}
+
+export type GrantCreditsResponse = {
+  ok: boolean
+  transaction_id: string
+  amount_dt: number
+  new_balance_dt: number
+  new_balance_usd_value: number
+  user: { id: string; email: string }
+}
+
+export type GlobalTransactionsResponse = {
+  transactions: AdminCreditTransaction[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** Get a user's credit balance and last 100 transactions. */
+export const getUserCredits = (userId: string) =>
+  request<UserCreditsResponse>(`/admin-api/users/${userId}/credits`)
+
+/** Grant credits to a user. amount_dt must be a multiple of 5. */
+export const grantUserCredits = (userId: string, amount_dt: number, note?: string) =>
+  request<GrantCreditsResponse>(`/admin-api/users/${userId}/credits/grant`, {
+    method: 'POST',
+    body: JSON.stringify({ amount_dt, note: note ?? null }),
+  })
+
+/** Global credit ledger, all users, paginated. */
+export const listCreditTransactions = (limit = 100, offset = 0) =>
+  request<GlobalTransactionsResponse>(
+    `/admin-api/credits/transactions?limit=${limit}&offset=${offset}`
+  )

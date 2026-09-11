@@ -21,6 +21,14 @@ import { sql, withDbResilience } from "../lib/db"
 import { requireSession } from "../middleware/session-auth"
 import { generateApiKey } from "../lib/apikeys"
 import { SESSION_COOKIE } from "../lib/session"
+import {
+  getBalance,
+  getTransactionHistory,
+  addCredits,
+  isValidPackage,
+  DT_PER_USD,
+  hasCredits as userHasCredits,
+} from "../lib/credits"
 
 export const userApi = new Hono()
 
@@ -71,6 +79,12 @@ userApi.get("/me", async (c) => {
   if (rows.length === 0) return c.json({ error: "user_not_found" }, 404)
 
   const u = rows[0] as any
+
+  // Attach credit balance to the /me response so the SPA doesn't need a
+  // second round-trip to display it in the sidebar / dashboard.
+  const creditBal = await getBalance(userId)
+  const hasCredits = creditBal.balance_dt > 0
+
   return c.json({
     id: u.id,
     email: u.email,
@@ -82,6 +96,10 @@ userApi.get("/me", async (c) => {
     used_this_month: Number(u.used_this_month ?? 0),
     active_key_count: Number(u.active_key_count ?? 0),
     total_key_count: Number(u.total_key_count ?? 0),
+    // Credits
+    credit_balance_dt: creditBal.balance_dt,
+    credit_balance_usd_value: creditBal.balance_usd_value,
+    has_credits: hasCredits,
   })
 })
 
@@ -212,4 +230,63 @@ userApi.get("/usage/daily", async (c) => {
 userApi.post("/logout", async (c) => {
   deleteCookie(c, SESSION_COOKIE, { path: "/" })
   return c.json({ ok: true })
+})
+
+// ---------------------------------------------------------------------------
+// GET /user-api/credits  —  current balance
+// ---------------------------------------------------------------------------
+
+userApi.get("/credits", async (c) => {
+  const { userId } = c.var.session
+  const balance = await getBalance(userId)
+  return c.json(balance)
+})
+
+// ---------------------------------------------------------------------------
+// GET /user-api/credits/history  —  last 50 transactions
+// ---------------------------------------------------------------------------
+
+userApi.get("/credits/history", async (c) => {
+  const { userId } = c.var.session
+  const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 50)))
+  const txs = await getTransactionHistory(userId, limit)
+  return c.json(txs)
+})
+
+// ---------------------------------------------------------------------------
+// POST /user-api/credits/purchase-intent
+// Create a pending purchase record for the chosen DT package.
+// When a real payment provider is integrated, it will confirm this
+// transaction via a webhook; for now the record is returned to the client.
+// ---------------------------------------------------------------------------
+
+userApi.post("/credits/purchase-intent", async (c) => {
+  const { userId } = c.var.session
+  const body = await c.req.json().catch(() => ({}))
+  const amount_dt = Number(body.amount_dt)
+
+  if (!isValidPackage(amount_dt)) {
+    return c.json({
+      error: "invalid_amount",
+      message: `amount_dt must be a multiple of 5, between 5 and 10000 DT. Got: ${amount_dt}`,
+    }, 400)
+  }
+
+  const usdValue = Number((amount_dt / DT_PER_USD).toFixed(2))
+
+  // Create a pending transaction (will be completed once payment clears).
+  // The payment_ref field will be populated by the payment provider webhook.
+  const result = await addCredits(userId, amount_dt, "purchase", "pending", {
+    paymentRef: undefined,
+    adminNote: `Purchase intent: ${amount_dt} DT ($${usdValue} AI value)`,
+  })
+
+  return c.json({
+    transaction_id: result.transaction_id,
+    amount_dt,
+    usd_value: usdValue,
+    status: "pending",
+    payment_ref: null,
+    message: "Purchase intent recorded. Connect a payment provider to complete the transaction.",
+  }, 201)
 })
