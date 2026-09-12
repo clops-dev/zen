@@ -20,10 +20,10 @@ import { sql, withDbResilience } from "./db"
 // Constants
 // ---------------------------------------------------------------------------
 
-/** How many DT equal $1 USD of AI usage. */
-export const DT_PER_USD = 4
+/** How many DT equal $1 USD of AI usage (Deal: $5 USD = 15 DT  →  1 USD = 3 DT). */
+export const DT_PER_USD = 3
 
-/** Minimum purchasable package size (in DT). */
+/** Minimum purchasable package size (in DT). $5 USD deal = 15 DT. */
 export const MIN_PACKAGE_DT = 5
 
 /** Packages must be multiples of this many DT. */
@@ -301,3 +301,120 @@ export async function getTransactionHistory(
     created_at: r.created_at,
   }))
 }
+
+// ---------------------------------------------------------------------------
+// Payment Demands (Pending User Requests)
+// ---------------------------------------------------------------------------
+
+export async function getPendingPaymentDemands() {
+  const rows = await withDbResilience(() => sql`
+    SELECT
+      ct.id,
+      ct.user_id,
+      u.email,
+      ct.amount_dt,
+      ct.type,
+      ct.status,
+      ct.admin_note,
+      ct.payment_ref,
+      ct.created_at
+    FROM credit_transactions ct
+    JOIN users u ON u.id = ct.user_id
+    WHERE ct.status = 'pending'
+    ORDER BY ct.created_at DESC
+  `)
+  return rows.map((r: any) => ({
+    id: r.id,
+    user_id: r.user_id,
+    email: r.email,
+    amount_dt: Number(r.amount_dt),
+    amount_usd: Number((Number(r.amount_dt) / DT_PER_USD).toFixed(2)),
+    type: r.type,
+    status: r.status,
+    admin_note: r.admin_note ?? null,
+    payment_ref: r.payment_ref ?? null,
+    created_at: r.created_at,
+  }))
+}
+
+export async function confirmPaymentDemand(
+  transactionId: string,
+  adminUserId: string,
+  note?: string,
+) {
+  return await sql.begin(async (tx) => {
+    const [txRow] = await tx`
+      SELECT id, user_id, amount_dt, status, type, admin_note
+      FROM credit_transactions
+      WHERE id = ${transactionId} FOR UPDATE
+    `
+    if (!txRow) throw new Error("Transaction not found")
+    if (txRow.status !== "pending") throw new Error(`Transaction is already ${txRow.status}`)
+
+    const amountDt = Number(txRow.amount_dt)
+    const userId = txRow.user_id
+    const baseNote = txRow.admin_note ?? ""
+    const updatedNote = note
+      ? (baseNote ? `${baseNote} | Confirmed by admin: ${note}` : `Confirmed by admin: ${note}`)
+      : (baseNote || "Confirmed by admin")
+
+    // Mark status completed
+    await tx`
+      UPDATE credit_transactions
+      SET status = 'completed',
+          admin_note = ${updatedNote},
+          created_by = ${adminUserId}
+      WHERE id = ${transactionId}
+    `
+
+    // Ensure balance row exists
+    await tx`
+      INSERT INTO user_credits (user_id, balance_dt)
+      VALUES (${userId}, 0)
+      ON CONFLICT (user_id) DO NOTHING
+    `
+
+    // Update balance
+    const [balRow] = await tx`
+      UPDATE user_credits
+      SET balance_dt = balance_dt + ${amountDt},
+          updated_at = now()
+      WHERE user_id = ${userId}
+      RETURNING balance_dt
+    `
+
+    return {
+      transaction_id: transactionId,
+      user_id: userId,
+      amount_dt: amountDt,
+      amount_usd: Number((amountDt / DT_PER_USD).toFixed(2)),
+      new_balance_dt: Number(balRow.balance_dt),
+      status: "completed",
+    }
+  })
+}
+
+export async function rejectPaymentDemand(
+  transactionId: string,
+  adminUserId: string,
+  note?: string,
+) {
+  const [txRow] = await withDbResilience(() => sql`
+    SELECT id, user_id, amount_dt, status
+    FROM credit_transactions
+    WHERE id = ${transactionId}
+  `)
+  if (!txRow) throw new Error("Transaction not found")
+  if (txRow.status !== "pending") throw new Error(`Transaction is already ${txRow.status}`)
+
+  await withDbResilience(() => sql`
+    UPDATE credit_transactions
+    SET status = 'failed',
+        admin_note = ${note ?? "Rejected by admin"},
+        created_by = ${adminUserId}
+    WHERE id = ${transactionId}
+  `)
+
+  return { ok: true, transaction_id: transactionId, status: "failed" }
+}
+

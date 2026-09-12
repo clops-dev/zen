@@ -11,6 +11,9 @@ import {
   addCredits,
   isValidPackage,
   DT_PER_USD,
+  getPendingPaymentDemands,
+  confirmPaymentDemand,
+  rejectPaymentDemand,
 } from "../lib/credits"
 
 export const adminApi = new Hono()
@@ -379,28 +382,56 @@ adminApi.get("/wallet/summary", async (c) => {
   try {
     const hasPriceCol = await requireColumn("subscriptions", "subscription_price_usd")
 
-    const userRows = await sql`
-      SELECT
-        u.id,
-        u.email,
-        u.role,
-        u.created_at,
-        COALESCE(s.tier, 'free') AS tier,
-        COALESCE(s.status, 'active') AS subscription_status,
-        ${hasPriceCol ? sql`COALESCE(s.subscription_price_usd, 0)` : sql`0`} AS subscription_price_usd,
-        COALESCE(SUM(r.cost_usd), 0) AS usage_cost_usd,
-        COALESCE(COUNT(r.id), 0) AS total_requests,
-        COALESCE(SUM(r.input_tokens), 0) AS input_tokens,
-        COALESCE(SUM(r.output_tokens), 0) AS output_tokens,
-        MAX(r.created_at) AS last_active_at
-      FROM users u
-      LEFT JOIN subscriptions s ON s.user_id = u.id
-      LEFT JOIN ai_requests r ON r.user_id = u.id
-      GROUP BY u.id, u.email, u.role, u.created_at, s.tier, s.status${hasPriceCol ? sql`, s.subscription_price_usd` : sql``}
-      ORDER BY u.created_at DESC
-    `
+    const [userRows, creditRevenueRows, txRows] = await Promise.all([
+      sql`
+        SELECT
+          u.id,
+          u.email,
+          u.role,
+          u.created_at,
+          COALESCE(s.tier, 'free') AS tier,
+          COALESCE(s.status, 'active') AS subscription_status,
+          ${hasPriceCol ? sql`COALESCE(s.subscription_price_usd, 0)` : sql`0`} AS subscription_price_usd,
+          COALESCE(SUM(r.cost_usd), 0) AS usage_cost_usd,
+          COALESCE(COUNT(r.id), 0) AS total_requests,
+          COALESCE(SUM(r.input_tokens), 0) AS input_tokens,
+          COALESCE(SUM(r.output_tokens), 0) AS output_tokens,
+          MAX(r.created_at) AS last_active_at
+        FROM users u
+        LEFT JOIN subscriptions s ON s.user_id = u.id
+        LEFT JOIN ai_requests r ON r.user_id = u.id
+        GROUP BY u.id, u.email, u.role, u.created_at, s.tier, s.status${hasPriceCol ? sql`, s.subscription_price_usd` : sql``}
+        ORDER BY u.created_at DESC
+      `,
+      sql`
+        SELECT COALESCE(SUM(amount_dt), 0) AS total_revenue_dt
+        FROM credit_transactions
+        WHERE status = 'completed' AND type IN ('purchase', 'admin_grant')
+      `,
+      sql`
+        SELECT
+          ct.id,
+          ct.user_id,
+          u.email,
+          ct.amount_dt,
+          ct.type,
+          ct.status,
+          ct.admin_note,
+          ct.payment_ref,
+          ct.created_at,
+          cb.email AS created_by_email
+        FROM credit_transactions ct
+        JOIN users u ON u.id = ct.user_id
+        LEFT JOIN users cb ON cb.id = ct.created_by
+        ORDER BY ct.created_at DESC
+        LIMIT 100
+      `,
+    ])
 
-    let accumulatedIncome = 0
+    const totalRevenueDt = Number(creditRevenueRows[0]?.total_revenue_dt ?? 0)
+    const totalCreditRevenueUsd = Number((totalRevenueDt / DT_PER_USD).toFixed(6))
+
+    let accumulatedSubIncome = 0
     let accumulatedUsageCost = 0
     let totalRequests = 0
     let totalInputTokens = 0
@@ -410,13 +441,12 @@ adminApi.get("/wallet/summary", async (c) => {
     const users = userRows.map((r: any) => {
       const subPrice = Number(Number(r.subscription_price_usd || 0).toFixed(6))
       const usageCost = Number(Number(r.usage_cost_usd || 0).toFixed(6))
-      const netIncome = Number((subPrice - usageCost).toFixed(6))
       const reqCount = Number(r.total_requests || 0)
       const inTokens = Number(r.input_tokens || 0)
       const outTokens = Number(r.output_tokens || 0)
       const totTokens = inTokens + outTokens
 
-      accumulatedIncome += subPrice
+      accumulatedSubIncome += subPrice
       accumulatedUsageCost += usageCost
       totalRequests += reqCount
       totalInputTokens += inTokens
@@ -433,7 +463,7 @@ adminApi.get("/wallet/summary", async (c) => {
         subscription_status: r.subscription_status,
         subscription_price_usd: subPrice.toFixed(6),
         usage_cost_usd: usageCost.toFixed(6),
-        net_income_usd: netIncome.toFixed(6),
+        net_income_usd: Number((subPrice - usageCost).toFixed(6)).toFixed(6),
         total_requests: reqCount,
         input_tokens: inTokens,
         output_tokens: outTokens,
@@ -442,24 +472,44 @@ adminApi.get("/wallet/summary", async (c) => {
       }
     })
 
-    const accumulatedNetIncome = Number((accumulatedIncome - accumulatedUsageCost).toFixed(6))
+    const totalRevenueUsd = Number((accumulatedSubIncome + totalCreditRevenueUsd).toFixed(6))
+    const totalNetIncomeUsd = Number((totalRevenueUsd - accumulatedUsageCost).toFixed(6))
+    const profitMarginPct = totalRevenueUsd > 0 ? Number(((totalNetIncomeUsd / totalRevenueUsd) * 100).toFixed(2)) : 0
     const totalTokens = totalInputTokens + totalOutputTokens
 
     return c.json({
       totals: {
         accumulated_users: users.length,
         active_users: activeUsersCount,
-        total_subscription_income_usd: accumulatedIncome.toFixed(6),
+        total_revenue_dt: totalRevenueDt.toFixed(2),
+        total_revenue_usd: totalRevenueUsd.toFixed(6),
+        total_subscription_income_usd: accumulatedSubIncome.toFixed(6),
+        total_credit_revenue_usd: totalCreditRevenueUsd.toFixed(6),
         total_usage_cost_usd: accumulatedUsageCost.toFixed(6),
-        total_net_income_usd: accumulatedNetIncome.toFixed(6),
+        total_net_income_usd: totalNetIncomeUsd.toFixed(6),
+        profit_margin_pct: profitMarginPct,
+        dt_per_usd: DT_PER_USD,
         total_requests: totalRequests,
         total_input_tokens: totalInputTokens,
         total_output_tokens: totalOutputTokens,
         total_tokens: totalTokens,
-        avg_income_per_user_usd: users.length > 0 ? (accumulatedIncome / users.length).toFixed(6) : "0.000000",
+        avg_income_per_user_usd: users.length > 0 ? (totalRevenueUsd / users.length).toFixed(6) : "0.000000",
         avg_cost_per_user_usd: users.length > 0 ? (accumulatedUsageCost / users.length).toFixed(6) : "0.000000",
       },
       users,
+      transactions: txRows.map((r: any) => ({
+        id: r.id,
+        user_id: r.user_id,
+        email: r.email,
+        amount_dt: Number(r.amount_dt),
+        amount_usd: Number((Number(r.amount_dt) / DT_PER_USD).toFixed(2)),
+        type: r.type,
+        status: r.status,
+        admin_note: r.admin_note ?? null,
+        payment_ref: r.payment_ref ?? null,
+        created_at: r.created_at,
+        created_by_email: r.created_by_email ?? null,
+      })),
     })
   } catch (err) {
     return jsonError(c, 500, "wallet_summary_failed", err instanceof Error ? err.message : String(err))
@@ -1976,4 +2026,84 @@ adminApi.get("/credits/transactions", async (c) => {
   } catch (err) {
     return c.json({ error: "fetch_failed", message: err instanceof Error ? err.message : String(err) }, 500)
   }
-})
+})
+
+// ---------------------------------------------------------------------------
+// Payment Demands (User Top-up Requests)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /admin-api/payments/demands
+ * Returns pending credit top-up requests / demands.
+ */
+adminApi.get("/payments/demands", async (c) => {
+  try {
+    const demands = await getPendingPaymentDemands()
+    return c.json({ demands })
+  } catch (err) {
+    return c.json({ error: "fetch_demands_failed", message: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+/**
+ * POST /admin-api/payments/demands/:id/confirm
+ * Admin grants & confirms a user's pending payment demand.
+ */
+adminApi.post("/payments/demands/:id/confirm", async (c) => {
+  const id = c.req.param("id")
+  const adminSession = c.var.session
+  const body = await c.req.json().catch(() => ({}))
+  const note = typeof body.note === "string" ? body.note.trim() : undefined
+
+  try {
+    const result = await confirmPaymentDemand(id, adminSession.userId, note)
+
+    const adminEmail = await actorEmailFor(adminSession.userId)
+    await audit({
+      actorId: adminSession.userId,
+      actorEmail: adminEmail,
+      action: "payments.confirm",
+      resource: "credit_transaction",
+      resourceId: id,
+      metadata: {
+        amount_dt: result.amount_dt,
+        user_id: result.user_id,
+        new_balance_dt: result.new_balance_dt,
+      },
+    })
+
+    return c.json({ ok: true, ...result })
+  } catch (err) {
+    return c.json({ error: "confirm_failed", message: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+/**
+ * POST /admin-api/payments/demands/:id/reject
+ * Admin rejects a user's pending payment demand.
+ */
+adminApi.post("/payments/demands/:id/reject", async (c) => {
+  const id = c.req.param("id")
+  const adminSession = c.var.session
+  const body = await c.req.json().catch(() => ({}))
+  const note = typeof body.note === "string" ? body.note.trim() : undefined
+
+  try {
+    const result = await rejectPaymentDemand(id, adminSession.userId, note)
+
+    const adminEmail = await actorEmailFor(adminSession.userId)
+    await audit({
+      actorId: adminSession.userId,
+      actorEmail: adminEmail,
+      action: "payments.reject",
+      resource: "credit_transaction",
+      resourceId: id,
+      metadata: { note },
+    })
+
+    return c.json(result)
+  } catch (err) {
+    return c.json({ error: "reject_failed", message: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+

@@ -297,9 +297,14 @@ export type WalletUser = {
 export type WalletTotals = {
   accumulated_users: number
   active_users: number
+  total_revenue_dt?: string
+  total_revenue_usd?: string
   total_subscription_income_usd: string
+  total_credit_revenue_usd?: string
   total_usage_cost_usd: string
   total_net_income_usd: string
+  profit_margin_pct?: number
+  dt_per_usd?: number
   total_requests: number
   total_input_tokens: number
   total_output_tokens: number
@@ -311,6 +316,7 @@ export type WalletTotals = {
 export type WalletSummary = {
   totals: WalletTotals
   users: WalletUser[]
+  transactions?: AdminCreditTransaction[]
 }
 
 export const listRequests = (q: Record<string, string | number | undefined>) => {
@@ -330,7 +336,7 @@ export const walletSummary = () => request<WalletSummary>("/admin-api/wallet/sum
 export const settings = () => request<any>("/admin-api/settings")
 
 // ---------------------------------------------------------------------------
-// Admin credit management
+// Admin credit management & Payments
 // ---------------------------------------------------------------------------
 
 export type AdminCreditBalance = {
@@ -344,6 +350,7 @@ export type AdminCreditTransaction = {
   user_id: string
   email: string
   amount_dt: number
+  amount_usd?: number
   type: 'purchase' | 'admin_grant' | 'usage' | 'refund' | 'adjustment'
   status: 'pending' | 'completed' | 'failed' | 'reversed'
   admin_note: string | null
@@ -374,6 +381,19 @@ export type GlobalTransactionsResponse = {
   offset: number
 }
 
+export type PaymentDemand = {
+  id: string
+  user_id: string
+  email: string
+  amount_dt: number
+  amount_usd: number
+  type: string
+  status: string
+  admin_note: string | null
+  payment_ref: string | null
+  created_at: string
+}
+
 /** Get a user's credit balance and last 100 transactions. */
 export const getUserCredits = (userId: string) =>
   request<UserCreditsResponse>(`/admin-api/users/${userId}/credits`)
@@ -389,4 +409,28 @@ export const grantUserCredits = (userId: string, amount_dt: number, note?: strin
 export const listCreditTransactions = (limit = 100, offset = 0) =>
   request<GlobalTransactionsResponse>(
     `/admin-api/credits/transactions?limit=${limit}&offset=${offset}`
+  )
+
+/** List pending user top-up demands. */
+export const listPaymentDemands = () =>
+  request<{ demands: PaymentDemand[] }>("/admin-api/payments/demands")
+
+/** Confirm and grant a pending user payment demand. */
+export const confirmPaymentDemand = (id: string, note?: string) =>
+  request<{ ok: boolean; transaction_id: string; amount_dt: number; new_balance_dt: number }>(
+    `/admin-api/payments/demands/${id}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    }
+  )
+
+/** Reject a pending user payment demand. */
+export const rejectPaymentDemand = (id: string, note?: string) =>
+  request<{ ok: boolean; transaction_id: string }>(
+    `/admin-api/payments/demands/${id}/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    }
   )

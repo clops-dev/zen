@@ -157,9 +157,9 @@ function UserRow({ u, onEditCap }: { u: User; onEditCap: (u: User) => void }) {
       <td className="text-right">
         <div className="flex items-center justify-end gap-1">
           <Link
-            to={`/users/${u.id}/credits`}
+            to={`/payments?userId=${u.id}`}
             className="btn-ghost"
-            title="Manage Credits"
+            title="Manage Credits & Payments"
           >
             <Coins className="size-4" />
           </Link>

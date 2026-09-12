@@ -13,6 +13,7 @@ import { ComboEditor } from "./pages/ComboEditor"
 import { ApiKeysPage } from "./pages/ApiKeys"
 import { RequestsPage } from "./pages/Requests"
 import { UsersPage } from "./pages/Users"
+import { PaymentsPage } from "./pages/Payments"
 import { UserCreditsPage } from "./pages/UserCreditsPage"
 import { WalletPage } from "./pages/Wallet"
 import { AuditPage } from "./pages/Audit"
@@ -142,7 +143,8 @@ export function App() {
             <Route path="/api-keys" element={<RouteBoundary><ApiKeysPage /></RouteBoundary>} />
             <Route path="/requests" element={<RouteBoundary><RequestsPage /></RouteBoundary>} />
             <Route path="/users" element={<RouteBoundary><UsersPage /></RouteBoundary>} />
-            <Route path="/users/:id/credits" element={<RouteBoundary><UserCreditsPage /></RouteBoundary>} />
+            <Route path="/payments" element={<RouteBoundary><PaymentsPage /></RouteBoundary>} />
+            <Route path="/users/:id/credits" element={<RouteBoundary><PaymentsPage /></RouteBoundary>} />
             <Route path="/wallet" element={<RouteBoundary><WalletPage /></RouteBoundary>} />
             <Route path="/audit" element={<RouteBoundary><AuditPage /></RouteBoundary>} />
             <Route path="/settings" element={<RouteBoundary><SettingsPage /></RouteBoundary>} />
