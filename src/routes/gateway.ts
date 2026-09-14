@@ -371,9 +371,9 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
             latencyMs, status: "success",
           }))
-          // Deduct from credit balance if this is a credit user.
-          if (creditStatus.isCreditUser && cost > 0) {
-            bg(deductCredits(user.id, usdToDt(cost), requestRowId).catch((err) => {
+          // Deduct from credit balance if cost > 0.
+          if (cost > 0) {
+            bg(deductCredits(user.id, usdToDt(cost), reqId).catch((err) => {
               if (err instanceof InsufficientCreditsError) {
                 console.warn(`[gateway] credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
               } else {
@@ -556,8 +556,8 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
             latencyMs, status: "success", requestId: reqId,
           })
-          // Deduct from credit balance if this is a credit user.
-          if (creditStatus.isCreditUser && cost > 0) {
+          // Deduct from credit balance if cost > 0.
+          if (cost > 0) {
             try {
               await deductCredits(user.id, usdToDt(cost), reqId)
             } catch (err) {

@@ -306,23 +306,25 @@ userApi.post("/credits/purchase", async (c) => {
   const prevBalanceUsd = prevSummary.remaining_credits
   const creditsAddedUsd = Number((amount_dt / DT_PER_USD).toFixed(2))
 
-  const result = await addCredits(userId, amount_dt, "purchase", "completed", {
-    adminNote: `Credit purchase: ${amount_dt} DT ($${creditsAddedUsd} AI value)`,
+  const result = await addCredits(userId, amount_dt, "purchase", "pending", {
+    adminNote: `User top-up purchase demand: ${amount_dt} DT ($${creditsAddedUsd} AI value)`,
   })
 
-  const newSummary = await getUserBillingSummary(userId)
-  const newBalanceUsd = newSummary.remaining_credits
+  const currentSummary = await getUserBillingSummary(userId)
 
   return c.json({
     ok: true,
+    status: "pending",
+    message: "Credit purchase demand submitted successfully. Your credits will be added to your wallet once approved by an admin.",
     receipt: {
       transaction_id: result.transaction_id,
       date: new Date().toISOString(),
       amount_paid_dt: amount_dt,
       credits_added_usd: creditsAddedUsd,
       previous_balance_usd: prevBalanceUsd,
-      new_balance_usd: newBalanceUsd,
+      new_balance_usd: prevBalanceUsd,
+      status: "pending",
     },
-    billing: newSummary,
+    billing: currentSummary,
   }, 201)
 })

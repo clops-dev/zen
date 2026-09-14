@@ -99,6 +99,7 @@ export interface PaymentReceipt {
   credits_added_usd: number;
   previous_balance_usd: number;
   new_balance_usd: number;
+  status?: string;
 }
 
 export interface PurchaseResponse {

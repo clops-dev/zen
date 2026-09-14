@@ -266,22 +266,24 @@ export const CreditsPage = () => {
               <div className="text-[10px] text-fg-subtle mt-1">{formatDate(receipt.date)}</div>
             </div>
 
+            {receipt.status === 'pending' && (
+              <div className="p-3 border border-yellow-500/40 bg-yellow-500/10 text-yellow-300 rounded text-xs text-center font-bold">
+                ⏳ PENDING ADMIN APPROVAL — Credits will be added to your wallet once confirmed by an admin.
+              </div>
+            )}
+
             <div className="space-y-3 text-xs bg-bg-subtle border border-brand/20 p-4 rounded-md">
               <div className="flex justify-between border-b border-border/40 pb-2">
-                <span className="text-fg-muted uppercase">Amount Paid:</span>
-                <span className="font-bold text-brand">{receipt.amount_paid_dt} DT</span>
+                <span className="text-fg-muted uppercase">Status:</span>
+                <span className="font-bold text-yellow-400 uppercase">{receipt.status ?? 'pending'}</span>
               </div>
               <div className="flex justify-between border-b border-border/40 pb-2">
-                <span className="text-fg-muted uppercase">Credits Added:</span>
-                <span className="font-bold text-brand">+${receipt.credits_added_usd.toFixed(2)}</span>
+                <span className="text-fg-muted uppercase">Requested Amount:</span>
+                <span className="font-bold text-brand">{receipt.amount_paid_dt} DT (${receipt.credits_added_usd.toFixed(2)})</span>
               </div>
               <div className="flex justify-between border-b border-border/40 pb-2">
-                <span className="text-fg-muted uppercase">Previous Balance:</span>
+                <span className="text-fg-muted uppercase">Current Balance:</span>
                 <span className="text-fg-subtle">${receipt.previous_balance_usd.toFixed(6)}</span>
-              </div>
-              <div className="flex justify-between border-b border-border/40 pb-2">
-                <span className="text-fg-muted uppercase">New Balance:</span>
-                <span className="font-bold text-fg">${receipt.new_balance_usd.toFixed(6)}</span>
               </div>
               <div className="flex justify-between pt-1 text-[11px]">
                 <span className="text-fg-muted uppercase">Transaction ID:</span>
