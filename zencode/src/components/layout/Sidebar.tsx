@@ -2,10 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard,
   Key,
-  Box,
   Activity,
-  Terminal as TerminalIcon,
-  BookOpen,
   Coins,
   Settings,
   LogOut,
@@ -21,14 +18,11 @@ interface SidebarProps {
 }
 
 const navItems = [
-  { to: '/app/dashboard',  icon: LayoutDashboard, label: 'Dashboard',     glyph: '▣' },
-  { to: '/app/api-keys',   icon: Key,             label: 'API Keys',      glyph: '◇' },
-  { to: '/app/models',     icon: Box,             label: 'Models',        glyph: '◈' },
-  { to: '/app/usage',      icon: Activity,        label: 'Usage',         glyph: '▤' },
-  { to: '/app/cli',        icon: TerminalIcon,    label: 'CLI',           glyph: '>_' },
-  { to: '/app/docs',       icon: BookOpen,        label: 'Documentation', glyph: '?' },
-  { to: '/app/credits',    icon: Coins,           label: 'Credits',       glyph: '◎' },
-  { to: '/app/settings',   icon: Settings,        label: 'Settings',      glyph: '⚙' },
+  { to: '/app/dashboard',  icon: LayoutDashboard, label: 'Dashboard', glyph: '▣' },
+  { to: '/app/api-keys',   icon: Key,             label: 'API Keys',  glyph: '◇' },
+  { to: '/app/usage',      icon: Activity,        label: 'Usage',     glyph: '▤' },
+  { to: '/app/credits',    icon: Coins,           label: 'Credits',   glyph: '◎' },
+  { to: '/app/settings',   icon: Settings,        label: 'Settings',  glyph: '⚙' },
 ];
 
 export const Sidebar = ({ open, onClose }: SidebarProps) => {

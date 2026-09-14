@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, Copy, Ban } from 'lucide-react';
+import { Plus, Ban, Eye, EyeOff, Globe, Terminal, Check } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
@@ -10,7 +10,6 @@ import { api, type ApiKey } from '@/lib/api';
 import { formatDate, copyToClipboard } from '@/lib/utils';
 import { useToast } from '@/hooks/useToast';
 
-
 export const ApiKeysPage = () => {
   const { toast } = useToast();
   const [keys, setKeys] = useState<ApiKey[]>([]);
@@ -19,6 +18,12 @@ export const ApiKeysPage = () => {
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [labelInput, setLabelInput] = useState('');
+  
+  // Visibility toggles
+  const [showCreatedKey, setShowCreatedKey] = useState(true);
+  const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
+
+  const endpointUrl = typeof window !== 'undefined' ? `${window.location.origin}/v1` : 'https://zen-1-3n8l.onrender.com/v1';
 
   const fetchKeys = useCallback(async () => {
     try {
@@ -38,6 +43,7 @@ export const ApiKeysPage = () => {
     try {
       const { api_key } = await api.createApiKey(labelInput.trim() || undefined);
       setCreatedKey(api_key);
+      setShowCreatedKey(true);
       await fetchKeys();
       toast({ title: 'API Key Created', variant: 'success' });
     } catch {
@@ -51,6 +57,7 @@ export const ApiKeysPage = () => {
     setCreateOpen(false);
     setCreatedKey(null);
     setLabelInput('');
+    setShowCreatedKey(true);
   };
 
   const handleRevoke = async (id: string, prefix: string) => {
@@ -63,9 +70,8 @@ export const ApiKeysPage = () => {
     }
   };
 
-  const handleCopy = async (text: string, name: string) => {
-    const ok = await copyToClipboard(text);
-    if (ok) toast({ title: 'Copied', description: name, variant: 'success' });
+  const toggleKeyVisibility = (id: string) => {
+    setVisibleKeys((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
   return (
@@ -75,9 +81,9 @@ export const ApiKeysPage = () => {
           <div className="text-[10px] text-fg-subtle uppercase tracking-widest mb-1">
             ~/api-keys
           </div>
-          <h1 className="text-2xl font-bold tracking-tight">API Keys</h1>
+          <h1 className="text-2xl font-bold tracking-tight">API Keys & Endpoint</h1>
           <p className="text-sm text-fg-muted mt-1">
-            Manage the credentials used by your Zencode CLI.
+            Manage your Zencode API keys and base endpoint URL.
           </p>
         </div>
         <button
@@ -89,12 +95,41 @@ export const ApiKeysPage = () => {
         </button>
       </div>
 
+      {/* Endpoint URL Card */}
+      <Card accent className="p-5 scanlines">
+        <div className="flex items-center justify-between flex-wrap gap-4 mb-3">
+          <div className="flex items-center gap-2">
+            <Globe size={16} className="text-brand" />
+            <span className="text-xs font-bold uppercase tracking-wider text-fg">Base API Endpoint URL</span>
+          </div>
+          <Badge variant="brand" dot>
+            v1 OpenAI Compatible
+          </Badge>
+        </div>
+
+        <div className="bg-bg-subtle border border-border rounded-md p-3 flex items-center justify-between gap-3 font-mono text-xs mb-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-fg-subtle">ENDPOINT:</span>
+            <span className="text-brand font-bold truncate">{endpointUrl}</span>
+          </div>
+          <CopyButton text={endpointUrl} label="Copy Endpoint" />
+        </div>
+
+        <div className="text-xs text-fg-muted space-y-1">
+          <div className="flex items-center gap-2 text-[11px]">
+            <Terminal size={12} className="text-fg-subtle" />
+            <span>Set <code className="text-brand">OPENAI_BASE_URL={endpointUrl}</code> in your environment or SDK.</span>
+          </div>
+        </div>
+      </Card>
+
+      {/* Keys Table */}
       <Card>
         <Table>
           <Thead>
             <Tr>
               <Th>Label</Th>
-              <Th>Key Prefix</Th>
+              <Th>API Key / Prefix</Th>
               <Th>Status</Th>
               <Th>Created</Th>
               <Th>Last Used</Th>
@@ -117,44 +152,60 @@ export const ApiKeysPage = () => {
                 </Td>
               </Tr>
             ) : (
-              keys.map((k) => (
-                <Tr key={k.id}>
-                  <Td>
-                    <div className="font-medium">{k.label ?? '—'}</div>
-                  </Td>
-                  <Td>
-                    <code className="font-mono text-[11px] bg-bg-subtle border border-border px-2 py-1 rounded">
-                      {k.key_prefix}…
-                    </code>
-                  </Td>
-                  <Td>
-                    <Badge variant={k.revoked ? 'error' : 'success'} dot>
-                      {k.revoked ? 'Revoked' : 'Active'}
-                    </Badge>
-                  </Td>
-                  <Td>
-                    <div className="text-[11px]">{formatDate(k.created_at)}</div>
-                  </Td>
-                  <Td>
-                    <div className="text-[11px] text-fg-muted">
-                      {k.last_used_at ? formatDate(k.last_used_at) : 'Never'}
-                    </div>
-                  </Td>
-                  <Td align="right">
-                    <div className="flex items-center justify-end gap-1">
-                      {!k.revoked && (
+              keys.map((k) => {
+                const isVisible = !!visibleKeys[k.id];
+                const displayKey = isVisible
+                  ? `${k.key_prefix}••••••••••••••••`
+                  : 'zen_sk_••••••••••••••••';
+
+                return (
+                  <Tr key={k.id}>
+                    <Td>
+                      <div className="font-medium">{k.label ?? '—'}</div>
+                    </Td>
+                    <Td>
+                      <div className="flex items-center gap-2">
+                        <code className="font-mono text-[11px] bg-bg-subtle border border-border px-2 py-1 rounded">
+                          {displayKey}
+                        </code>
                         <button
-                          onClick={() => handleRevoke(k.id, k.key_prefix)}
-                          className="p-1.5 text-fg-muted hover:text-yellow-400 hover:bg-yellow-400/10 border border-transparent hover:border-yellow-400/30 rounded"
-                          title="Revoke"
+                          onClick={() => toggleKeyVisibility(k.id)}
+                          className="p-1 text-fg-muted hover:text-brand transition-colors"
+                          title={isVisible ? 'Hide Key' : 'Reveal Key Prefix'}
                         >
-                          <Ban size={12} />
+                          {isVisible ? <EyeOff size={13} /> : <Eye size={13} />}
                         </button>
-                      )}
-                    </div>
-                  </Td>
-                </Tr>
-              ))
+                      </div>
+                    </Td>
+                    <Td>
+                      <Badge variant={k.revoked ? 'error' : 'success'} dot>
+                        {k.revoked ? 'Revoked' : 'Active'}
+                      </Badge>
+                    </Td>
+                    <Td>
+                      <div className="text-[11px]">{formatDate(k.created_at)}</div>
+                    </Td>
+                    <Td>
+                      <div className="text-[11px] text-fg-muted">
+                        {k.last_used_at ? formatDate(k.last_used_at) : 'Never'}
+                      </div>
+                    </Td>
+                    <Td align="right">
+                      <div className="flex items-center justify-end gap-1">
+                        {!k.revoked && (
+                          <button
+                            onClick={() => handleRevoke(k.id, k.key_prefix)}
+                            className="p-1.5 text-fg-muted hover:text-yellow-400 hover:bg-yellow-400/10 border border-transparent hover:border-yellow-400/30 rounded"
+                            title="Revoke"
+                          >
+                            <Ban size={12} />
+                          </button>
+                        )}
+                      </div>
+                    </Td>
+                  </Tr>
+                );
+              })
             )}
           </Tbody>
         </Table>
@@ -162,9 +213,9 @@ export const ApiKeysPage = () => {
 
       {/* Create Modal */}
       <Modal
-        open={createOpen && !createdKey}
+        open={createOpen || !!createdKey}
         onClose={handleCloseCreate}
-        title="Create API Key"
+        title={createdKey ? 'API Key Generated' : 'Create API Key'}
         size="md"
       >
         {!createdKey ? (
@@ -201,16 +252,28 @@ export const ApiKeysPage = () => {
               <div className="w-2 h-2 bg-brand animate-pulseDot" />
               <span className="text-xs font-bold uppercase tracking-wider">API KEY CREATED</span>
             </div>
-            <div className="bg-bg-subtle border border-brand/30 rounded p-3">
-              <code className="text-xs break-all font-mono">{createdKey}</code>
+            
+            <div className="bg-bg-subtle border border-brand/30 rounded p-3 flex items-center justify-between gap-2">
+              <code className="text-xs break-all font-mono">
+                {showCreatedKey ? createdKey : '••••••••••••••••••••••••••••••••••••••••'}
+              </code>
+              <button
+                onClick={() => setShowCreatedKey((v) => !v)}
+                className="p-1.5 text-fg-muted hover:text-brand transition-colors shrink-0"
+                title={showCreatedKey ? 'Hide key string' : 'Show key string'}
+              >
+                {showCreatedKey ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
             </div>
+
             <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded">
               <span className="text-yellow-400 text-sm">⚠</span>
               <div className="text-[11px] text-yellow-200">
                 <div className="font-bold">Save this key now.</div>
-                <div className="text-yellow-300/80 mt-0.5">You will not be able to see it again.</div>
+                <div className="text-yellow-300/80 mt-0.5">You will not be able to view the raw key secret again after closing this window.</div>
               </div>
             </div>
+
             <div className="flex items-center justify-end gap-2 pt-2">
               <CopyButton text={createdKey} label="Copy API Key" />
               <button

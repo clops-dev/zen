@@ -1,57 +1,77 @@
+import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, Coins, Key, Zap, Plus, Download, Box, BookOpen, ArrowUpRight, ShoppingCart } from 'lucide-react';
+import { Activity, Coins, Key, Zap, Plus, ShoppingCart, Settings, ArrowUpRight } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { mockActivities } from '@/data/mockData';
-import { formatNumber, formatTokens } from '@/lib/utils';
+import { formatNumber, formatTokens, formatDate } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
-import { useState } from 'react';
+import { api, type DailyUsage, type CreditTransaction, type ApiKey } from '@/lib/api';
 
 type Range = '7' | '30' | '90';
+const USD_TO_TND = 3.10;
 
-const DT_PER_USD = 4;
+export const DashboardPage = () => {
+  const { user } = useAuth();
+  const [range, setRange] = useState<Range>('7');
+  const [dailyUsage, setDailyUsage] = useState<DailyUsage[]>([]);
+  const [transactions, setTransactions] = useState<CreditTransaction[]>([]);
+  const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [loading, setLoading] = useState(true);
 
-const generateUsageData = (range: Range) => {
-  const days = range === '7' ? 7 : range === '30' ? 30 : 90;
-  const base = range === '7' ? 800 : range === '30' ? 700 : 600;
-  const data = [];
-  for (let i = days - 1; i >= 0; i--) {
+  const loadDashboardData = useCallback(async () => {
+    try {
+      setLoading(true);
+      const days = range === '7' ? 7 : range === '30' ? 30 : 90;
+      const [usageData, txData, keysData] = await Promise.all([
+        api.getDailyUsage(days).catch(() => []),
+        api.getCreditHistory(5).catch(() => []),
+        api.listApiKeys().catch(() => []),
+      ]);
+      setDailyUsage(usageData);
+      setTransactions(txData);
+      setKeys(keysData);
+    } catch (err) {
+      console.error('[DashboardPage] Failed to fetch dashboard data:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [range]);
+
+  useEffect(() => {
+    loadDashboardData();
+  }, [loadDashboardData]);
+
+  // Generate chart data based on selected range and real dailyUsage API response
+  const numDays = range === '7' ? 7 : range === '30' ? 30 : 90;
+  const usageMap = new Map(dailyUsage.map((u) => [new Date(u.day).toISOString().split('T')[0], u.request_count]));
+  
+  const chartData = [];
+  for (let i = numDays - 1; i >= 0; i--) {
     const d = new Date();
     d.setDate(d.getDate() - i);
-    const variation = Math.sin((i / days) * Math.PI * 2) * 200 + Math.random() * 200;
-    const value = Math.max(200, Math.round(base + variation + (range === '90' ? 100 : 0)));
-    data.push({
-      date: d.toISOString().split('T')[0],
+    const dateKey = d.toISOString().split('T')[0];
+    const value = usageMap.get(dateKey) ?? 0;
+    chartData.push({
+      date: dateKey,
       value,
       label: range === '7'
         ? d.toLocaleDateString('en-US', { weekday: 'short' })
         : d.getDate().toString(),
     });
   }
-  return data;
-};
 
-export const DashboardPage = () => {
-  const { user } = useAuth();
-  const [range, setRange] = useState<Range>('7');
-  const usageData = generateUsageData(range);
-  const max = Math.max(...usageData.map((d) => d.value));
+  const maxVal = Math.max(1, ...chartData.map((d) => d.value));
+  const totalRequests = chartData.reduce((a, b) => a + b.value, 0);
 
   const creditBalance = user?.credit_balance_dt ?? 0;
   const creditUsdValue = user?.credit_balance_usd_value ?? 0;
+  const creditTndValue = creditUsdValue * USD_TO_TND;
   const hasCredits = user?.has_credits ?? false;
 
-  const stats: {
-    label: string;
-    value: string;
-    subtext: string;
-    icon: any;
-    color: string;
-    change?: string;
-  }[] = [
+  const stats = [
     {
       label: 'API Requests',
-      value: formatNumber(usageData.reduce((a, b) => a + b.value, 0)),
+      value: formatNumber(totalRequests),
       subtext: `Last ${range} days`,
       icon: Activity,
       color: 'text-brand',
@@ -67,7 +87,7 @@ export const DashboardPage = () => {
       label: 'Credit Balance',
       value: `${creditBalance.toFixed(1)} DT`,
       subtext: hasCredits
-        ? `$${creditUsdValue.toFixed(2)} AI usage value`
+        ? `$${creditUsdValue.toFixed(2)} / ${creditTndValue.toFixed(2)} TND`
         : 'Free tier · buy credits',
       icon: Zap,
       color: hasCredits ? 'text-brand' : 'text-fg-muted',
@@ -83,10 +103,9 @@ export const DashboardPage = () => {
 
   const quickActions = [
     { label: 'Create API Key', icon: Plus, to: '/app/api-keys' },
-    { label: 'Download CLI', icon: Download, to: '/app/cli' },
     { label: 'Buy Credits', icon: ShoppingCart, to: '/app/credits' },
-    { label: 'Explore Models', icon: Box, to: '/app/models' },
-    { label: 'Documentation', icon: BookOpen, to: '/app/docs' },
+    { label: 'Usage Analytics', icon: Activity, to: '/app/usage' },
+    { label: 'Settings', icon: Settings, to: '/app/settings' },
   ];
 
   return (
@@ -136,12 +155,6 @@ export const DashboardPage = () => {
             </div>
             <div className="space-y-1">
               <div className="text-2xl font-bold">{s.value}</div>
-              {s.change && (
-                <div className="flex items-center gap-1 text-xs text-brand">
-                  <ArrowUpRight size={11} />
-                  <span className="font-medium">{s.change}</span>
-                </div>
-              )}
               {s.subtext && (
                 <div className="text-xs text-fg-subtle">{s.subtext}</div>
               )}
@@ -150,51 +163,58 @@ export const DashboardPage = () => {
         ))}
       </div>
 
-      {/* CLI Status + Usage */}
+      {/* Account Status + Usage Graph */}
       <div className="grid lg:grid-cols-3 gap-4">
-        {/* CLI Status Card */}
-        <Card accent className="lg:col-span-1 p-5 scanlines relative overflow-hidden">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 bg-brand" />
-              <span className="text-xs font-bold tracking-wider">ZENCODE CLI</span>
+        {/* Account Status Card */}
+        <Card accent className="lg:col-span-1 p-5 scanlines relative overflow-hidden flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-brand" />
+                <span className="text-xs font-bold tracking-wider">ACCOUNT OVERVIEW</span>
+              </div>
+              <Badge variant="success" dot>
+                {user?.status?.toUpperCase() ?? 'ACTIVE'}
+              </Badge>
             </div>
-            <Badge variant="success" dot>
-              ONLINE
-            </Badge>
-          </div>
 
-          <div className="space-y-3 font-mono text-xs">
-            <div className="flex justify-between border-b border-border/30 pb-2">
-              <span className="text-fg-muted">Version</span>
-              <span>v7.3.58</span>
-            </div>
-            <div className="flex justify-between border-b border-border/30 pb-2">
-              <span className="text-fg-muted">Account</span>
-              <span className="truncate max-w-[120px]">{user?.email?.split('@')[0] ?? '—'}</span>
-            </div>
-            <div className="flex justify-between border-b border-border/30 pb-2">
-              <span className="text-fg-muted">Credits</span>
-              <span className={hasCredits ? 'text-brand' : 'text-fg-muted'}>
-                {hasCredits ? `${creditBalance.toFixed(1)} DT` : 'Free tier'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-fg-muted">Status</span>
-              <span className="text-brand">Connected</span>
+            <div className="space-y-3 font-mono text-xs">
+              <div className="flex justify-between border-b border-border/30 pb-2">
+                <span className="text-fg-muted">Email</span>
+                <span className="truncate max-w-[130px]" title={user?.email}>{user?.email ?? '—'}</span>
+              </div>
+              <div className="flex justify-between border-b border-border/30 pb-2">
+                <span className="text-fg-muted">Plan Tier</span>
+                <span className="uppercase text-brand font-bold">{user?.tier ?? 'Free'}</span>
+              </div>
+              <div className="flex justify-between border-b border-border/30 pb-2">
+                <span className="text-fg-muted">Balance (DT)</span>
+                <span className={hasCredits ? 'text-brand font-bold' : 'text-fg-muted'}>
+                  {creditBalance.toFixed(1)} DT
+                </span>
+              </div>
+              <div className="flex justify-between border-b border-border/30 pb-2">
+                <span className="text-fg-muted">Value ($ / TND)</span>
+                <span className="text-fg font-bold">
+                  ${creditUsdValue.toFixed(2)} / {creditTndValue.toFixed(2)} TND
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-fg-muted">Active Keys</span>
+                <span className="text-brand">{user?.active_key_count ?? 0}</span>
+              </div>
             </div>
           </div>
 
           <div className="mt-5">
             <Link
-              to="/app/cli"
+              to="/app/api-keys"
               className="block w-full text-center px-4 py-2 bg-brand/10 hover:bg-brand/20 border border-brand/40 text-xs font-bold uppercase tracking-wider rounded transition-colors btn-press"
             >
-              [ Manage CLI ]
+              [ Manage API Keys ]
             </Link>
           </div>
 
-          {/* Terminal cursor animation */}
           <div className="absolute bottom-2 right-3 text-brand text-xs animate-blink">▊</div>
         </Card>
 
@@ -203,7 +223,7 @@ export const DashboardPage = () => {
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 bg-brand" />
-              <span className="text-xs font-bold tracking-wider">API USAGE</span>
+              <span className="text-xs font-bold tracking-wider">REAL API USAGE</span>
             </div>
             <div className="flex items-center gap-1">
               {(['7', '30', '90'] as Range[]).map((r) => (
@@ -225,7 +245,6 @@ export const DashboardPage = () => {
           {/* Chart */}
           <div className="relative h-48 mb-2">
             <svg viewBox="0 0 400 160" className="w-full h-full" preserveAspectRatio="none">
-              {/* Grid lines */}
               {[0, 1, 2, 3].map((i) => (
                 <line
                   key={i}
@@ -237,26 +256,24 @@ export const DashboardPage = () => {
                   strokeDasharray="2 4"
                 />
               ))}
-              {/* Line path */}
               <polyline
                 fill="none"
                 stroke="#ef4444"
                 strokeWidth="2"
-                points={usageData
+                points={chartData
                   .map((d, i) => {
-                    const x = (i / (usageData.length - 1)) * 400;
-                    const y = 150 - (d.value / max) * 130;
+                    const x = (i / Math.max(1, chartData.length - 1)) * 400;
+                    const y = 150 - (d.value / maxVal) * 130;
                     return `${x},${y}`;
                   })
                   .join(' ')}
               />
-              {/* Fill */}
               <polygon
                 fill="url(#redGrad)"
-                points={`0,150 ${usageData
+                points={`0,150 ${chartData
                   .map((d, i) => {
-                    const x = (i / (usageData.length - 1)) * 400;
-                    const y = 150 - (d.value / max) * 130;
+                    const x = (i / Math.max(1, chartData.length - 1)) * 400;
+                    const y = 150 - (d.value / maxVal) * 130;
                     return `${x},${y}`;
                   })
                   .join(' ')} 400,150`}
@@ -267,17 +284,16 @@ export const DashboardPage = () => {
                   <stop offset="100%" stopColor="#ef4444" stopOpacity="0" />
                 </linearGradient>
               </defs>
-              {/* Data points */}
-              {usageData.map((d, i) => {
-                const x = (i / (usageData.length - 1)) * 400;
-                const y = 150 - (d.value / max) * 130;
+              {chartData.map((d, i) => {
+                const x = (i / Math.max(1, chartData.length - 1)) * 400;
+                const y = 150 - (d.value / maxVal) * 130;
                 return <circle key={i} cx={x} cy={y} r="2" fill="#ef4444" />;
               })}
             </svg>
           </div>
           {/* Labels */}
           <div className="flex justify-between text-[10px] text-fg-subtle font-mono px-1">
-            {usageData.filter((_, i) => i % Math.ceil(usageData.length / 7) === 0).map((d, i) => (
+            {chartData.filter((_, i) => i % Math.ceil(chartData.length / 7) === 0).map((d, i) => (
               <span key={i}>{d.label}</span>
             ))}
           </div>
@@ -285,10 +301,10 @@ export const DashboardPage = () => {
           <div className="mt-4 pt-3 border-t border-border flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-fg-muted">
               <div className="w-3 h-0.5 bg-brand" />
-              <span>Total: {formatNumber(usageData.reduce((a, b) => a + b.value, 0))} requests</span>
+              <span>Total: {formatNumber(totalRequests)} requests in last {range} days</span>
             </div>
             <span className="text-[10px] text-fg-subtle uppercase">
-              avg {Math.round(usageData.reduce((a, b) => a + b.value, 0) / usageData.length)}/day
+              avg {Math.round(totalRequests / numDays)}/day
             </span>
           </div>
         </Card>
@@ -297,26 +313,64 @@ export const DashboardPage = () => {
       {/* Recent Activity + Quick Actions */}
       <div className="grid lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2 p-5">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="w-2 h-2 bg-brand" />
-            <span className="text-xs font-bold tracking-wider">RECENT ACTIVITY</span>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 bg-brand" />
+              <span className="text-xs font-bold tracking-wider">RECENT ACTIVITY</span>
+            </div>
+            <span className="text-[10px] text-fg-subtle uppercase">Live audit log</span>
           </div>
           <div className="space-y-1">
-            {mockActivities.map((a) => (
-              <div
-                key={a.id}
-                className="flex items-start gap-3 px-3 py-3 hover:bg-bg-card border border-transparent hover:border-border rounded-md transition-colors"
-              >
-                <div className="w-1.5 h-1.5 bg-brand rounded-full mt-1.5 shrink-0 animate-pulseDot" />
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-medium">{a.title}</div>
-                  <div className="text-[11px] text-fg-muted">{a.subtitle}</div>
-                </div>
-                <div className="text-[10px] text-fg-subtle uppercase whitespace-nowrap">
-                  {a.time}
-                </div>
+            {loading ? (
+              <div className="text-xs text-fg-subtle py-6 text-center animate-pulse">
+                Loading activity log...
               </div>
-            ))}
+            ) : transactions.length === 0 && keys.length === 0 ? (
+              <div className="text-xs text-fg-muted py-6 text-center">
+                No recent activity logged yet.
+              </div>
+            ) : (
+              <>
+                {transactions.map((tx) => (
+                  <div
+                    key={tx.id}
+                    className="flex items-start gap-3 px-3 py-3 hover:bg-bg-card border border-transparent hover:border-border rounded-md transition-colors"
+                  >
+                    <div className="w-1.5 h-1.5 bg-brand rounded-full mt-1.5 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-medium">
+                        {tx.type === 'purchase'
+                          ? `Credit Purchase (${tx.amount_dt} DT)`
+                          : tx.type === 'usage'
+                          ? `AI Model Request (-${Math.abs(tx.amount_dt).toFixed(3)} DT)`
+                          : `Account Transaction (${tx.amount_dt > 0 ? '+' : ''}${tx.amount_dt} DT)`}
+                      </div>
+                      <div className="text-[11px] text-fg-muted">
+                        {tx.admin_note ?? `Status: ${tx.status}`} · ≈ ${(Math.abs(tx.amount_dt) / 4).toFixed(2)} / ${(Math.abs(tx.amount_dt) / 4 * USD_TO_TND).toFixed(2)} TND
+                      </div>
+                    </div>
+                    <div className="text-[10px] text-fg-subtle uppercase whitespace-nowrap">
+                      {formatDate(tx.created_at)}
+                    </div>
+                  </div>
+                ))}
+                {keys.map((k) => (
+                  <div
+                    key={k.id}
+                    className="flex items-start gap-3 px-3 py-3 hover:bg-bg-card border border-transparent hover:border-border rounded-md transition-colors"
+                  >
+                    <div className="w-1.5 h-1.5 bg-brand rounded-full mt-1.5 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-medium">API Key {k.revoked ? 'Revoked' : 'Created'}</div>
+                      <div className="text-[11px] text-fg-muted">Prefix: {k.key_prefix}… {k.label ? `(${k.label})` : ''}</div>
+                    </div>
+                    <div className="text-[10px] text-fg-subtle uppercase whitespace-nowrap">
+                      {formatDate(k.created_at)}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
           </div>
         </Card>
 

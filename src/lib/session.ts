@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { env } from "./env"
 
-const SESSION_TTL_MS = 8 * 60 * 60 * 1000
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 export const SESSION_COOKIE = "zen_session"
 
 const sign = (payload: string) => createHmac("sha256", env.SESSION_SECRET).update(payload).digest("hex")

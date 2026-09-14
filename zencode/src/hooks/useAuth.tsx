@@ -21,19 +21,36 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 // Provider
 // ---------------------------------------------------------------------------
 
+const STORAGE_KEY = 'zencode_user_session';
+
+function getStoredUser(): UserProfile | null {
+  try {
+    const cached = localStorage.getItem(STORAGE_KEY);
+    return cached ? JSON.parse(cached) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<UserProfile | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState<UserProfile | null>(getStoredUser);
+  const [loading, setLoading] = useState(!user);
   const navigate = useNavigate();
 
   const fetchMe = useCallback(async () => {
     try {
       const profile = await api.me();
       setUser(profile);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
+      } catch {
+        // ignore quota errors
+      }
     } catch (err) {
       if (err instanceof ApiError && err.isUnauthorized) {
         // No valid session — will be redirected by the route guard in App.tsx.
         setUser(null);
+        localStorage.removeItem(STORAGE_KEY);
       } else {
         // Network / server error — keep whatever we had (avoids flicker on
         // transient errors) but log for debugging.
@@ -57,6 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Best-effort — proceed to login page regardless.
     }
     setUser(null);
+    localStorage.removeItem(STORAGE_KEY);
     navigate('/login', { replace: true });
   }, [navigate]);
 
