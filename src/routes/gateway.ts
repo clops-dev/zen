@@ -232,52 +232,20 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   const maxOutputTokens = max_tokens ?? 16384
 
   // ---------------------------------------------------------------------------
-  // Quota / credit check
+  // Credit check — user access depends strictly on available credit balance
   // ---------------------------------------------------------------------------
-  //
-  // Two distinct paths:
-  //   1. Credit user  — has purchased/been granted DT credits. Bypasses the
-  //                     free token-budget system entirely. Blocked only when
-  //                     their credit balance is insufficient for this request.
-  //   2. Free user    — no credit balance. Subject to the existing monthly
-  //                     token-budget quota system (unchanged behaviour).
 
-  const creditStatus = await checkCreditQuota(user.id)
-
-  // quota is used later for complexity-tier routing (maxComplexityTier);
-  // for credit users we still need the suspension/existence check but
-  // NOT the budget check.
-  const quota = creditStatus.isCreditUser
-    ? await checkQuota(user.id).then(q => {
-        // For credit users, only honour suspension — ignore budget
-        if (!q.allowed && q.reason === "suspended") return q
-        if (!q.allowed && q.reason === "no_subscription") return q
-        // Otherwise allow, with full complexity routing
-        return { allowed: true, maxComplexityTier: "complex" as const }
-      })
-    : await checkQuota(user.id)
+  const quota = await checkQuota(user.id, 0.0001)
 
   if (!quota.allowed) {
     bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: quota.reason, requestId: reqId }))
-    let statusCode = 401
-    let message = "Your account is not authorized."
-    if (quota.reason === "USAGE_LIMIT_REACHED") {
-      statusCode = 402
-      message = "Your spending limit has been reached. Please contact an administrator."
-    } else if (quota.reason === "quota_exceeded") {
-      statusCode = 402
-      message = "Your free usage quota has been reached for this month. Purchase AI credits to continue."
-    } else if (quota.reason === "suspended") {
-      statusCode = 403
-      message = "Your account is suspended — contact support."
-    } else if (quota.reason === "no_subscription") {
-      statusCode = 402
-      message = "Your account has no active quota. Purchase AI credits to get started."
-    }
+    const statusCode = 402
+    const remainingVal = quota.remainingUsd ?? 0
+    const message = `Insufficient credits. Your current balance is $${remainingVal.toFixed(2)}. Please purchase additional credits to continue.`
 
     const errorBody = {
-      error: (quota.reason ?? "UNAUTHORIZED").toUpperCase(),
-      message: message
+      error: "insufficient_credits",
+      message,
     }
 
     if (stream) {

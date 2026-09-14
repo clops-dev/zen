@@ -27,7 +27,7 @@ import {
   addCredits,
   isValidPackage,
   DT_PER_USD,
-  hasCredits as userHasCredits,
+  getUserBillingSummary,
 } from "../lib/credits"
 
 export const userApi = new Hono()
@@ -59,48 +59,46 @@ userApi.get("/me", async (c) => {
       u.email,
       u.avatar_url,
       u.created_at,
-      s.tier,
-      s.status,
-      s.token_budget_monthly,
-      COALESCE(
-        (SELECT total_input_tokens + total_output_tokens
-           FROM monthly_usage
-          WHERE user_id = u.id
-            AND month = date_trunc('month', now())::date),
-        0
-      ) AS used_this_month,
       (SELECT COUNT(*) FROM api_keys WHERE user_id = u.id AND revoked = false) AS active_key_count,
       (SELECT COUNT(*) FROM api_keys WHERE user_id = u.id) AS total_key_count
     FROM users u
-    LEFT JOIN subscriptions s ON s.user_id = u.id
     WHERE u.id = ${userId}
   `)
 
   if (rows.length === 0) return c.json({ error: "user_not_found" }, 404)
-
   const u = rows[0] as any
 
-  // Attach credit balance to the /me response so the SPA doesn't need a
-  // second round-trip to display it in the sidebar / dashboard.
-  const creditBal = await getBalance(userId)
-  const hasCredits = creditBal.balance_dt > 0
+  const billing = await getUserBillingSummary(userId)
 
   return c.json({
     id: u.id,
     email: u.email,
     avatar_url: u.avatar_url ?? null,
     created_at: u.created_at,
-    tier: u.tier ?? "free",
-    status: u.status ?? "active",
-    token_budget_monthly: Number(u.token_budget_monthly ?? 50000),
-    used_this_month: Number(u.used_this_month ?? 0),
+    status: "active",
     active_key_count: Number(u.active_key_count ?? 0),
     total_key_count: Number(u.total_key_count ?? 0),
-    // Credits
-    credit_balance_dt: creditBal.balance_dt,
-    credit_balance_usd_value: creditBal.balance_usd_value,
-    has_credits: hasCredits,
+    // Single Source of Truth Billing Data
+    total_credits_purchased: billing.total_credits_purchased,
+    total_credits_purchased_dt: billing.total_credits_purchased_dt,
+    total_usage_cost: billing.total_usage_cost,
+    remaining_credits: billing.remaining_credits,
+    remaining_credits_dt: billing.remaining_credits_dt,
+    total_requests: billing.total_requests,
+    input_tokens: billing.input_tokens,
+    output_tokens: billing.output_tokens,
+    total_tokens: billing.total_tokens,
+    // Backward compatibility helpers
+    credit_balance_dt: billing.remaining_credits_dt,
+    credit_balance_usd_value: billing.remaining_credits,
+    has_credits: billing.remaining_credits > 0,
   })
+})
+
+userApi.get("/billing/summary", async (c) => {
+  const { userId } = c.var.session
+  const billing = await getUserBillingSummary(userId)
+  return c.json(billing)
 })
 
 // ---------------------------------------------------------------------------
@@ -274,8 +272,6 @@ userApi.post("/credits/purchase-intent", async (c) => {
 
   const usdValue = Number((amount_dt / DT_PER_USD).toFixed(2))
 
-  // Create a pending transaction (will be completed once payment clears).
-  // The payment_ref field will be populated by the payment provider webhook.
   const result = await addCredits(userId, amount_dt, "purchase", "pending", {
     paymentRef: undefined,
     adminNote: `Purchase intent: ${amount_dt} DT ($${usdValue} AI value)`,
@@ -288,5 +284,45 @@ userApi.post("/credits/purchase-intent", async (c) => {
     status: "pending",
     payment_ref: null,
     message: "Purchase intent recorded. Connect a payment provider to complete the transaction.",
+  }, 201)
+})
+
+userApi.post("/credits/purchase", async (c) => {
+  const { userId } = c.var.session
+  const body = await c.req.json().catch(() => ({}))
+  let amount_dt = Number(body.amount_dt)
+  if (!amount_dt && body.amount_usd) {
+    amount_dt = Number(body.amount_usd) * DT_PER_USD
+  }
+
+  if (!isValidPackage(amount_dt)) {
+    return c.json({
+      error: "invalid_amount",
+      message: `amount_dt must be a multiple of 5, between 5 and 10000 DT. Got: ${amount_dt}`,
+    }, 400)
+  }
+
+  const prevSummary = await getUserBillingSummary(userId)
+  const prevBalanceUsd = prevSummary.remaining_credits
+  const creditsAddedUsd = Number((amount_dt / DT_PER_USD).toFixed(2))
+
+  const result = await addCredits(userId, amount_dt, "purchase", "completed", {
+    adminNote: `Credit purchase: ${amount_dt} DT ($${creditsAddedUsd} AI value)`,
+  })
+
+  const newSummary = await getUserBillingSummary(userId)
+  const newBalanceUsd = newSummary.remaining_credits
+
+  return c.json({
+    ok: true,
+    receipt: {
+      transaction_id: result.transaction_id,
+      date: new Date().toISOString(),
+      amount_paid_dt: amount_dt,
+      credits_added_usd: creditsAddedUsd,
+      previous_balance_usd: prevBalanceUsd,
+      new_balance_usd: newBalanceUsd,
+    },
+    billing: newSummary,
   }, 201)
 })

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, Coins, Key, Zap, Plus, ShoppingCart, Settings, ArrowUpRight } from 'lucide-react';
+import { Activity, Coins, Key, Zap, Plus, ShoppingCart, Settings, ArrowUpRight, DollarSign } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { formatNumber, formatTokens, formatDate } from '@/lib/utils';
@@ -8,11 +8,10 @@ import { useAuth } from '@/hooks/useAuth';
 import { api, type DailyUsage, type CreditTransaction, type ApiKey } from '@/lib/api';
 
 type Range = '7' | '30' | '90';
-const USD_TO_TND = 3.10;
 
 export const DashboardPage = () => {
   const { user } = useAuth();
-  const [range, setRange] = useState<Range>('7');
+  const [range, setRange] = useState<Range>('30');
   const [dailyUsage, setDailyUsage] = useState<DailyUsage[]>([]);
   const [transactions, setTransactions] = useState<CreditTransaction[]>([]);
   const [keys, setKeys] = useState<ApiKey[]>([]);
@@ -41,7 +40,21 @@ export const DashboardPage = () => {
     loadDashboardData();
   }, [loadDashboardData]);
 
-  // Generate chart data based on selected range and real dailyUsage API response
+  // Single Source of Truth Billing Values from backend user object
+  const totalPurchasedUsd = user?.total_credits_purchased ?? 0;
+  const totalPurchasedDt = user?.total_credits_purchased_dt ?? (totalPurchasedUsd * 3);
+  const totalUsageUsd = user?.total_usage_cost ?? 0;
+  const remainingUsd = user?.remaining_credits ?? (totalPurchasedUsd - totalUsageUsd);
+  const remainingDt = user?.remaining_credits_dt ?? (remainingUsd * 3);
+
+  const inputTokens = user?.input_tokens ?? 0;
+  const outputTokens = user?.output_tokens ?? 0;
+  const totalTokens = user?.total_tokens ?? (inputTokens + outputTokens);
+  const totalRequests = user?.total_requests ?? 0;
+
+  const hasCredits = remainingUsd > 0;
+
+  // Chart data calculation
   const numDays = range === '7' ? 7 : range === '30' ? 30 : 90;
   const usageMap = new Map(dailyUsage.map((u) => [new Date(u.day).toISOString().split('T')[0], u.request_count]));
   
@@ -61,45 +74,6 @@ export const DashboardPage = () => {
   }
 
   const maxVal = Math.max(1, ...chartData.map((d) => d.value));
-  const totalRequests = chartData.reduce((a, b) => a + b.value, 0);
-
-  const creditBalance = user?.credit_balance_dt ?? 0;
-  const creditUsdValue = user?.credit_balance_usd_value ?? 0;
-  const creditTndValue = creditUsdValue * USD_TO_TND;
-  const hasCredits = user?.has_credits ?? false;
-
-  const stats = [
-    {
-      label: 'API Requests',
-      value: formatNumber(totalRequests),
-      subtext: `Last ${range} days`,
-      icon: Activity,
-      color: 'text-brand',
-    },
-    {
-      label: 'Tokens Used',
-      value: formatTokens(user?.used_this_month ?? 0),
-      subtext: 'This month',
-      icon: Coins,
-      color: 'text-brand',
-    },
-    {
-      label: 'Credit Balance',
-      value: `${creditBalance.toFixed(1)} DT`,
-      subtext: hasCredits
-        ? `$${creditUsdValue.toFixed(2)} / ${creditTndValue.toFixed(2)} TND`
-        : 'Free tier · buy credits',
-      icon: Zap,
-      color: hasCredits ? 'text-brand' : 'text-fg-muted',
-    },
-    {
-      label: 'API Keys',
-      value: String(user?.total_key_count ?? 0),
-      subtext: `${user?.active_key_count ?? 0} active`,
-      icon: Key,
-      color: 'text-brand',
-    },
-  ];
 
   const quickActions = [
     { label: 'Create API Key', icon: Plus, to: '/app/api-keys' },
@@ -120,18 +94,18 @@ export const DashboardPage = () => {
           Welcome back, {user?.email?.split('@')[0] ?? 'Developer'}.
         </h1>
         <p className="text-sm text-fg-muted mt-1">
-          Your Zencode environment is ready.
+          Your Zencode credits-only environment is active.
         </p>
       </div>
 
-      {/* Credit status banner for users with low/no credits */}
+      {/* Credit status warning banner for zero credits */}
       {!hasCredits && (
         <div className="flex items-center gap-3 px-4 py-3 bg-brand/5 border border-brand/20 rounded-md">
           <Zap size={14} className="text-brand shrink-0" />
           <div className="flex-1 min-w-0">
             <span className="text-xs text-fg-muted">
-              You're on the free tier. 
-              <span className="text-fg ml-1">Purchase AI credits to unlock unlimited usage.</span>
+              Insufficient credit balance ($0.00). 
+              <span className="text-fg ml-1 font-bold">Purchase AI credits to execute model requests ($5 = 15 DT).</span>
             </span>
           </div>
           <Link
@@ -143,38 +117,132 @@ export const DashboardPage = () => {
         </div>
       )}
 
-      {/* Stats Grid */}
+      {/* Requirement 3: AI CREDITS Section */}
+      <Card accent className="p-6 scanlines">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Zap size={16} className="text-brand" />
+            <span className="text-xs font-bold tracking-widest uppercase text-fg">AI CREDITS</span>
+          </div>
+          <Badge variant={hasCredits ? "success" : "error"} dot>
+            {hasCredits ? "ACTIVE BALANCE" : "ZERO BALANCE"}
+          </Badge>
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 pt-2">
+          {/* Available Credits */}
+          <div className="bg-bg-subtle/50 border border-border p-4 rounded-md">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-fg-muted mb-1">
+              Available Credits
+            </div>
+            <div className="text-2xl font-bold font-mono text-fg">
+              ${remainingUsd.toFixed(6)}
+            </div>
+            <div className="text-[11px] text-brand font-bold mt-1">
+              ≈ {remainingDt.toFixed(2)} DT
+            </div>
+          </div>
+
+          {/* Purchased */}
+          <div className="bg-bg-subtle/50 border border-border p-4 rounded-md">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-fg-muted mb-1">
+              Purchased
+            </div>
+            <div className="text-2xl font-bold font-mono text-fg">
+              ${totalPurchasedUsd.toFixed(2)}
+            </div>
+            <div className="text-[11px] text-fg-muted mt-1">
+              {totalPurchasedUsd} USD / {totalPurchasedDt.toFixed(0)} DT
+            </div>
+          </div>
+
+          {/* Usage */}
+          <div className="bg-bg-subtle/50 border border-border p-4 rounded-md">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-fg-muted mb-1">
+              Usage
+            </div>
+            <div className="text-2xl font-bold font-mono text-red-400">
+              ${totalUsageUsd.toFixed(6)}
+            </div>
+            <div className="text-[11px] text-fg-subtle mt-1">
+              {totalRequests} total requests
+            </div>
+          </div>
+
+          {/* Remaining */}
+          <div className="bg-bg-subtle/50 border border-border p-4 rounded-md">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-fg-muted mb-1">
+              Remaining
+            </div>
+            <div className="text-2xl font-bold font-mono text-brand">
+              ${remainingUsd.toFixed(6)}
+            </div>
+            <div className="text-[11px] text-fg-subtle mt-1">
+              Deducted atomically
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      {/* Requirement 3: Usage Statistics Section */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4">
-        {stats.map((s) => (
-          <Card key={s.label} hover className="p-4">
-            <div className="flex items-start justify-between mb-3">
-              <div className="text-[10px] font-bold uppercase tracking-widest text-fg-muted">
-                {s.label}
-              </div>
-              <s.icon size={14} className={s.color} />
-            </div>
-            <div className="space-y-1">
-              <div className="text-2xl font-bold">{s.value}</div>
-              {s.subtext && (
-                <div className="text-xs text-fg-subtle">{s.subtext}</div>
-              )}
-            </div>
-          </Card>
-        ))}
+        <Card hover className="p-4">
+          <div className="flex items-start justify-between mb-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-fg-muted">
+              Total Usage Cost
+            </span>
+            <DollarSign size={14} className="text-brand" />
+          </div>
+          <div className="text-2xl font-bold font-mono">${totalUsageUsd.toFixed(6)}</div>
+          <div className="text-xs text-fg-subtle mt-1">From backend AI requests</div>
+        </Card>
+
+        <Card hover className="p-4">
+          <div className="flex items-start justify-between mb-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-fg-muted">
+              Input Tokens
+            </span>
+            <Coins size={14} className="text-brand" />
+          </div>
+          <div className="text-2xl font-bold font-mono">{formatTokens(inputTokens)}</div>
+          <div className="text-xs text-fg-subtle mt-1">Total prompt tokens</div>
+        </Card>
+
+        <Card hover className="p-4">
+          <div className="flex items-start justify-between mb-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-fg-muted">
+              Output Tokens
+            </span>
+            <Coins size={14} className="text-brand" />
+          </div>
+          <div className="text-2xl font-bold font-mono">{formatTokens(outputTokens)}</div>
+          <div className="text-xs text-fg-subtle mt-1">Total generated tokens</div>
+        </Card>
+
+        <Card hover className="p-4">
+          <div className="flex items-start justify-between mb-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-fg-muted">
+              Total Tokens
+            </span>
+            <Activity size={14} className="text-brand" />
+          </div>
+          <div className="text-2xl font-bold font-mono">{formatTokens(totalTokens)}</div>
+          <div className="text-xs text-fg-subtle mt-1">{totalRequests} requests processed</div>
+        </Card>
       </div>
 
-      {/* Account Status + Usage Graph */}
+      {/* Account Overview + Usage Graph */}
       <div className="grid lg:grid-cols-3 gap-4">
-        {/* Account Status Card */}
+        {/* Account Overview Card */}
         <Card accent className="lg:col-span-1 p-5 scanlines relative overflow-hidden flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 bg-brand" />
-                <span className="text-xs font-bold tracking-wider">ACCOUNT OVERVIEW</span>
+                <span className="text-xs font-bold tracking-wider">ACCOUNT METRICS</span>
               </div>
               <Badge variant="success" dot>
-                {user?.status?.toUpperCase() ?? 'ACTIVE'}
+                ONLINE
               </Badge>
             </div>
 
@@ -184,19 +252,17 @@ export const DashboardPage = () => {
                 <span className="truncate max-w-[130px]" title={user?.email}>{user?.email ?? '—'}</span>
               </div>
               <div className="flex justify-between border-b border-border/30 pb-2">
-                <span className="text-fg-muted">Plan Tier</span>
-                <span className="uppercase text-brand font-bold">{user?.tier ?? 'Free'}</span>
+                <span className="text-fg-muted">Billing Model</span>
+                <span className="uppercase text-brand font-bold">Credits Only</span>
               </div>
               <div className="flex justify-between border-b border-border/30 pb-2">
-                <span className="text-fg-muted">Balance (DT)</span>
-                <span className={hasCredits ? 'text-brand font-bold' : 'text-fg-muted'}>
-                  {creditBalance.toFixed(1)} DT
-                </span>
+                <span className="text-fg-muted">Rate</span>
+                <span className="text-fg font-bold">$5 = 15 DT (1 USD = 3 DT)</span>
               </div>
               <div className="flex justify-between border-b border-border/30 pb-2">
-                <span className="text-fg-muted">Value ($ / TND)</span>
-                <span className="text-fg font-bold">
-                  ${creditUsdValue.toFixed(2)} / {creditTndValue.toFixed(2)} TND
+                <span className="text-fg-muted">Remaining Balance</span>
+                <span className={hasCredits ? 'text-brand font-bold' : 'text-red-400 font-bold'}>
+                  ${remainingUsd.toFixed(6)}
                 </span>
               </div>
               <div className="flex justify-between">
@@ -208,10 +274,10 @@ export const DashboardPage = () => {
 
           <div className="mt-5">
             <Link
-              to="/app/api-keys"
+              to="/app/credits"
               className="block w-full text-center px-4 py-2 bg-brand/10 hover:bg-brand/20 border border-brand/40 text-xs font-bold uppercase tracking-wider rounded transition-colors btn-press"
             >
-              [ Manage API Keys ]
+              [ Buy Credits ]
             </Link>
           </div>
 
@@ -223,7 +289,7 @@ export const DashboardPage = () => {
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 bg-brand" />
-              <span className="text-xs font-bold tracking-wider">REAL API USAGE</span>
+              <span className="text-xs font-bold tracking-wider uppercase">Real API Request Volume</span>
             </div>
             <div className="flex items-center gap-1">
               {(['7', '30', '90'] as Range[]).map((r) => (
@@ -301,7 +367,7 @@ export const DashboardPage = () => {
           <div className="mt-4 pt-3 border-t border-border flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-fg-muted">
               <div className="w-3 h-0.5 bg-brand" />
-              <span>Total: {formatNumber(totalRequests)} requests in last {range} days</span>
+              <span>Total: {formatNumber(totalRequests)} requests</span>
             </div>
             <span className="text-[10px] text-fg-subtle uppercase">
               avg {Math.round(totalRequests / numDays)}/day
@@ -316,9 +382,9 @@ export const DashboardPage = () => {
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 bg-brand" />
-              <span className="text-xs font-bold tracking-wider">RECENT ACTIVITY</span>
+              <span className="text-xs font-bold tracking-wider">CREDIT & USAGE AUDIT LOG</span>
             </div>
-            <span className="text-[10px] text-fg-subtle uppercase">Live audit log</span>
+            <span className="text-[10px] text-fg-subtle uppercase">Live transactions</span>
           </div>
           <div className="space-y-1">
             {loading ? (
@@ -340,32 +406,17 @@ export const DashboardPage = () => {
                     <div className="flex-1 min-w-0">
                       <div className="text-xs font-medium">
                         {tx.type === 'purchase'
-                          ? `Credit Purchase (${tx.amount_dt} DT)`
+                          ? `Credit Purchase (+${tx.amount_dt} DT / +$${(tx.amount_dt / 3).toFixed(2)})`
                           : tx.type === 'usage'
-                          ? `AI Model Request (-${Math.abs(tx.amount_dt).toFixed(3)} DT)`
+                          ? `AI Model Request (-${Math.abs(tx.amount_dt).toFixed(4)} DT / -$${(Math.abs(tx.amount_dt) / 3).toFixed(6)})`
                           : `Account Transaction (${tx.amount_dt > 0 ? '+' : ''}${tx.amount_dt} DT)`}
                       </div>
                       <div className="text-[11px] text-fg-muted">
-                        {tx.admin_note ?? `Status: ${tx.status}`} · ≈ ${(Math.abs(tx.amount_dt) / 4).toFixed(2)} / ${(Math.abs(tx.amount_dt) / 4 * USD_TO_TND).toFixed(2)} TND
+                        {tx.admin_note ?? `Status: ${tx.status}`}
                       </div>
                     </div>
                     <div className="text-[10px] text-fg-subtle uppercase whitespace-nowrap">
                       {formatDate(tx.created_at)}
-                    </div>
-                  </div>
-                ))}
-                {keys.map((k) => (
-                  <div
-                    key={k.id}
-                    className="flex items-start gap-3 px-3 py-3 hover:bg-bg-card border border-transparent hover:border-border rounded-md transition-colors"
-                  >
-                    <div className="w-1.5 h-1.5 bg-brand rounded-full mt-1.5 shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-medium">API Key {k.revoked ? 'Revoked' : 'Created'}</div>
-                      <div className="text-[11px] text-fg-muted">Prefix: {k.key_prefix}… {k.label ? `(${k.label})` : ''}</div>
-                    </div>
-                    <div className="text-[10px] text-fg-subtle uppercase whitespace-nowrap">
-                      {formatDate(k.created_at)}
                     </div>
                   </div>
                 ))}

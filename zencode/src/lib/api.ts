@@ -15,13 +15,22 @@ export interface UserProfile {
   email: string;
   avatar_url: string | null;
   created_at: string;
-  tier: 'free' | 'pro' | 'enterprise';
-  status: 'active' | 'suspended';
-  token_budget_monthly: number;
-  used_this_month: number;
+  status: 'active';
   active_key_count: number;
   total_key_count: number;
-  // Credits (added in migration 018)
+
+  // Single Source of Truth Credits & Billing Metrics
+  total_credits_purchased: number;      // USD (e.g. 5.000000)
+  total_credits_purchased_dt: number;   // DT (e.g. 15.0000)
+  total_usage_cost: number;             // USD (e.g. 0.118351)
+  remaining_credits: number;            // USD (e.g. 4.881649)
+  remaining_credits_dt: number;         // DT (e.g. 14.6449)
+  total_requests: number;               // (e.g. 46)
+  input_tokens: number;                 // (e.g. 535800)
+  output_tokens: number;                // (e.g. 4900)
+  total_tokens: number;                 // (e.g. 540700)
+
+  // Backward compatibility fields
   credit_balance_dt: number;
   credit_balance_usd_value: number;
   has_credits: boolean;
@@ -83,6 +92,21 @@ export interface PurchaseIntentResponse {
   message: string;
 }
 
+export interface PaymentReceipt {
+  transaction_id: string;
+  date: string;
+  amount_paid_dt: number;
+  credits_added_usd: number;
+  previous_balance_usd: number;
+  new_balance_usd: number;
+}
+
+export interface PurchaseResponse {
+  ok: boolean;
+  receipt: PaymentReceipt;
+  billing: UserProfile;
+}
+
 // ---------------------------------------------------------------------------
 // Error class
 // ---------------------------------------------------------------------------
@@ -140,7 +164,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // ---------------------------------------------------------------------------
 
 export const api = {
-  /** Fetch the current user's profile + subscription summary + credit balance. */
+  /** Fetch the current user's profile + credit balance & single source of truth billing metrics. */
   me(): Promise<UserProfile> {
     return apiFetch<UserProfile>('/user-api/me');
   },
@@ -187,9 +211,17 @@ export const api = {
   },
 
   /**
-   * Create a purchase intent for a DT credit package.
-   * amount_dt must be a positive multiple of 5 (e.g. 5, 10, 20, 50, 100).
+   * Purchase a credit package instantly ($5 = 15 DT, $10 = 30 DT, etc.)
+   * Returns confirmation receipt and updated user billing state.
    */
+  purchaseCredits(amount_dt: number): Promise<PurchaseResponse> {
+    return apiFetch<PurchaseResponse>('/user-api/credits/purchase', {
+      method: 'POST',
+      body: JSON.stringify({ amount_dt }),
+    });
+  },
+
+  /** Create a pending purchase intent. */
   purchaseCreditIntent(amount_dt: number): Promise<PurchaseIntentResponse> {
     return apiFetch<PurchaseIntentResponse>('/user-api/credits/purchase-intent', {
       method: 'POST',
@@ -202,11 +234,7 @@ export const api = {
     return apiFetch<{ ok: boolean }>('/user-api/logout', { method: 'POST', body: '{}' });
   },
 
-  /**
-   * Build the Google OAuth URL. Optionally pass a device_code (from the
-   * CLI `zencode login` flow) so the backend can approve it after Google
-   * auth succeeds.
-   */
+  /** Build Google OAuth URL. */
   googleLoginUrl(deviceCode?: string | null): string {
     const params = new URLSearchParams();
     if (deviceCode) params.set('device_code', deviceCode);

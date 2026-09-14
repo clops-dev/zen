@@ -205,8 +205,9 @@ googleAuth.get("/google/callback", async (c) => {
           RETURNING id
         `
         await sql`
-          INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly)
-          VALUES (${newUser.id}, 'free', 'active', ${env.DEFAULT_FREE_TOKEN_BUDGET})
+          INSERT INTO user_credits (user_id, balance_dt)
+          VALUES (${newUser.id}, 0)
+          ON CONFLICT (user_id) DO NOTHING
         `
         userId = newUser.id
       }
@@ -222,12 +223,6 @@ googleAuth.get("/google/callback", async (c) => {
     const [userRecord] = await sql`SELECT role FROM users WHERE id = ${userId}`
     if (userRecord?.role === "admin") {
       userRole = "admin"
-    }
-
-    // Verify the account isn't suspended.
-    const [sub] = await sql`SELECT status FROM subscriptions WHERE user_id = ${userId}`
-    if (sub?.status === "suspended") {
-      return c.redirect("/zencode/login?error=account_suspended", 303)
     }
 
     // Issue session cookie with the user's actual database role.

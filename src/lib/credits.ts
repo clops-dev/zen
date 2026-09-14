@@ -418,3 +418,103 @@ export async function rejectPaymentDemand(
   return { ok: true, transaction_id: transactionId, status: "failed" }
 }
 
+// ---------------------------------------------------------------------------
+// Single Source of Truth Billing Summaries
+// ---------------------------------------------------------------------------
+
+export interface UserBillingSummary {
+  userId: string
+  total_credits_purchased: number
+  total_credits_purchased_dt: number
+  total_usage_cost: number
+  remaining_credits: number
+  remaining_credits_dt: number
+  total_requests: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+}
+
+export async function getUserBillingSummary(userId: string): Promise<UserBillingSummary> {
+  const [purchasedRow] = await withDbResilience(() => sql`
+    SELECT COALESCE(SUM(amount_dt), 0) AS total_dt
+    FROM credit_transactions
+    WHERE user_id = ${userId}
+      AND type IN ('purchase', 'admin_grant', 'refund', 'adjustment')
+      AND status = 'completed'
+      AND amount_dt > 0
+  `)
+
+  const [usageRow] = await withDbResilience(() => sql`
+    SELECT
+      COUNT(*) AS total_requests,
+      COALESCE(SUM(input_tokens), 0) AS input_tokens,
+      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+      COALESCE(SUM(cost_usd), 0) AS total_usage_cost
+    FROM ai_requests
+    WHERE user_id = ${userId} AND status = 'success'
+  `)
+
+  const total_credits_purchased_dt = Number(purchasedRow?.total_dt ?? 0)
+  const total_credits_purchased = Number((total_credits_purchased_dt / DT_PER_USD).toFixed(6))
+  const total_usage_cost = Number(Number(usageRow?.total_usage_cost ?? 0).toFixed(6))
+  const remaining_credits = Number(Math.max(-9999, total_credits_purchased - total_usage_cost).toFixed(6))
+  const remaining_credits_dt = Number((remaining_credits * DT_PER_USD).toFixed(4))
+  
+  const total_requests = Number(usageRow?.total_requests ?? 0)
+  const input_tokens = Number(usageRow?.input_tokens ?? 0)
+  const output_tokens = Number(usageRow?.output_tokens ?? 0)
+  const total_tokens = input_tokens + output_tokens
+
+  return {
+    userId,
+    total_credits_purchased,
+    total_credits_purchased_dt,
+    total_usage_cost,
+    remaining_credits,
+    remaining_credits_dt,
+    total_requests,
+    input_tokens,
+    output_tokens,
+    total_tokens,
+  }
+}
+
+export interface AdminBillingOverview {
+  total_credit_sales_dt: number
+  total_credits_sold_usd: number
+  total_ai_usage_cost_usd: number
+  gross_margin_usd: number
+  total_users: number
+}
+
+export async function getAdminBillingOverview(): Promise<AdminBillingOverview> {
+  const [salesRow] = await withDbResilience(() => sql`
+    SELECT COALESCE(SUM(amount_dt), 0) AS total_dt
+    FROM credit_transactions
+    WHERE type IN ('purchase', 'admin_grant') AND status = 'completed' AND amount_dt > 0
+  `)
+  const [costRow] = await withDbResilience(() => sql`
+    SELECT COALESCE(SUM(cost_usd), 0) AS total_cost
+    FROM ai_requests WHERE status = 'success'
+  `)
+  const [userCountRow] = await withDbResilience(() => sql`
+    SELECT COUNT(*) AS total_users FROM users
+  `)
+
+  const total_credit_sales_dt = Number(salesRow?.total_dt ?? 0)
+  const total_credits_sold_usd = Number((total_credit_sales_dt / DT_PER_USD).toFixed(6))
+  const total_ai_usage_cost_usd = Number(Number(costRow?.total_cost ?? 0).toFixed(6))
+  const gross_margin_usd = Number((total_credits_sold_usd - total_ai_usage_cost_usd).toFixed(6))
+  const total_users = Number(userCountRow?.total_users ?? 0)
+
+  return {
+    total_credit_sales_dt,
+    total_credits_sold_usd,
+    total_ai_usage_cost_usd,
+    gross_margin_usd,
+    total_users,
+  }
+}
+
+

@@ -17,18 +17,32 @@ import {
   LineChart,
 } from "recharts"
 import { Activity, AlertTriangle, CheckCircle2, Cpu, KeyRound, Server, Timer, Users, Wallet } from "lucide-react"
-import { dashboardOverview, providerHealth } from "../api"
-
 export function Dashboard() {
   const q = useQuery({ queryKey: ["dashboard"], queryFn: dashboardOverview, refetchInterval: 30_000 })
   const h = useQuery({ queryKey: ["health"], queryFn: providerHealth, refetchInterval: 60_000 })
+  const bQ = useQuery({ queryKey: ["admin-billing"], queryFn: getAdminBilling, refetchInterval: 30_000 })
 
   const t: any = q.data?.totals ?? {}
   const c: any = q.data?.counts ?? {}
+  const b: any = bQ.data ?? {}
 
   return (
     <div className="flex flex-col gap-6">
       <Header />
+
+      <section className="card p-4 border-accent/20 bg-accent/5">
+        <div className="text-xs uppercase tracking-[0.14em] font-semibold text-muted mb-3 flex items-center gap-2">
+          <Wallet className="size-4 text-accent" />
+          <span>TOTAL REVENUE OVERVIEW (CREDITS-ONLY SYSTEM)</span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <Stat label="Credit Sales (DT)" value={`${b.total_credit_sales_dt ?? 0} DT`} />
+          <Stat label="Credits Sold ($)" value={`$${(b.total_credits_sold_usd ?? 0).toFixed(2)}`} />
+          <Stat label="AI Usage Cost" value={`$${(b.total_ai_usage_cost_usd ?? 0).toFixed(6)}`} />
+          <Stat label="Gross Margin" value={`$${(b.gross_margin_usd ?? 0).toFixed(6)}`} accent="good" />
+          <Stat label="Total Users" value={b.total_users ?? c.users ?? 0} />
+        </div>
+      </section>
 
       <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         <Metric icon={<Activity className="size-4" />} label="Total requests" value={fmt(t.total_requests)} />

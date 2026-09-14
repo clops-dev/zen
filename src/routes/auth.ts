@@ -29,8 +29,9 @@ auth.post("/signup", async (c) => {
     INSERT INTO users (email, password_hash, role) VALUES (${email}, ${hash}, 'user') RETURNING id
   `)
   await withDbResilience(() => sql`
-    INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly)
-    VALUES (${newUser.id}, 'free', 'active', ${env.DEFAULT_FREE_TOKEN_BUDGET})
+    INSERT INTO user_credits (user_id, balance_dt)
+    VALUES (${newUser.id}, 0)
+    ON CONFLICT (user_id) DO NOTHING
   `)
 
   const session = issueSession(newUser.id, "user")

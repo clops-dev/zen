@@ -1,29 +1,20 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Coins, ShoppingCart, Check, Clock, ArrowUpRight, ArrowDownRight, Zap, Info, TrendingDown } from 'lucide-react';
+import { Coins, ShoppingCart, Check, Clock, ArrowUpRight, ArrowDownRight, Zap, Info, Receipt, X } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Modal } from '@/components/ui/modal';
 import { useAuth } from '@/hooks/useAuth';
-import { api, ApiError, type CreditTransaction } from '@/lib/api';
+import { api, ApiError, type CreditTransaction, type PaymentReceipt } from '@/lib/api';
 
-const DT_PER_USD = 4;
-const USD_TO_TND = 3.10;
+const DT_PER_USD = 3;
 
-// Credit packages — multiples of 5 DT
+// Requirement 8: Fixed Credit packages following 1 USD = 3 DT
 const PACKAGES = [
-  { dt: 5,   popular: false },
-  { dt: 10,  popular: false },
-  { dt: 20,  popular: true  },
-  { dt: 50,  popular: false },
-  { dt: 100, popular: false },
+  { usd: 5,   dt: 15,  popular: false },
+  { usd: 10,  dt: 30,  popular: true  },
+  { usd: 25,  dt: 75,  popular: false },
+  { usd: 50,  dt: 150, popular: false },
 ] as const;
-
-function dtToUsd(dt: number) {
-  return dt / DT_PER_USD;
-}
-
-function dtToTnd(dt: number) {
-  return (dt / DT_PER_USD) * USD_TO_TND;
-}
 
 function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleDateString('en-US', {
@@ -32,34 +23,20 @@ function formatDate(dateStr: string) {
   });
 }
 
-const TX_TYPE_LABELS: Record<string, string> = {
-  purchase: 'Purchase',
-  admin_grant: 'Admin Grant',
-  usage: 'AI Usage (Deducted)',
-  refund: 'Refund',
-  adjustment: 'Adjustment',
-};
-
-const TX_TYPE_COLORS: Record<string, string> = {
-  purchase: 'text-brand',
-  admin_grant: 'text-brand',
-  usage: 'text-red-400',
-  refund: 'text-brand',
-  adjustment: 'text-fg-muted',
-};
-
 export const CreditsPage = () => {
   const { user, refresh } = useAuth();
   const [transactions, setTransactions] = useState<CreditTransaction[]>([]);
   const [txLoading, setTxLoading] = useState(true);
   const [purchasing, setPurchasing] = useState<number | null>(null);
-  const [purchaseMsg, setPurchaseMsg] = useState<string | null>(null);
   const [purchaseError, setPurchaseError] = useState<string | null>(null);
+  const [receipt, setReceipt] = useState<PaymentReceipt | null>(null);
 
-  const balance = user?.credit_balance_dt ?? 0;
-  const balanceUsd = user?.credit_balance_usd_value ?? 0;
-  const balanceTnd = balanceUsd * USD_TO_TND;
-  const hasCredits = user?.has_credits ?? false;
+  // Single Source of Truth Values from backend
+  const purchasedUsd = user?.total_credits_purchased ?? 0;
+  const usageUsd = user?.total_usage_cost ?? 0;
+  const remainingUsd = user?.remaining_credits ?? (purchasedUsd - usageUsd);
+  const remainingDt = user?.remaining_credits_dt ?? (remainingUsd * DT_PER_USD);
+  const hasCredits = remainingUsd > 0;
 
   const loadHistory = useCallback(async () => {
     try {
@@ -77,17 +54,12 @@ export const CreditsPage = () => {
     loadHistory();
   }, [loadHistory]);
 
-  const handlePurchase = async (amountDt: number) => {
-    setPurchasing(amountDt);
-    setPurchaseMsg(null);
+  const handlePurchase = async (dtAmount: number) => {
+    setPurchasing(dtAmount);
     setPurchaseError(null);
     try {
-      const result = await api.purchaseCreditIntent(amountDt);
-      const tndVal = (result.usd_value * USD_TO_TND).toFixed(2);
-      setPurchaseMsg(
-        `Purchase intent created for ${result.amount_dt} DT ($${result.usd_value.toFixed(2)} USD / ${tndVal} TND value). ` +
-        `Transaction ID: ${result.transaction_id.slice(0, 8)}…`
-      );
+      const res = await api.purchaseCredits(dtAmount);
+      setReceipt(res.receipt);
       await refresh();
       await loadHistory();
     } catch (err) {
@@ -101,12 +73,6 @@ export const CreditsPage = () => {
     }
   };
 
-  // Calculate real AI usage deductions from transactions
-  const usageTxs = transactions.filter((t) => t.type === 'usage');
-  const totalUsageDt = Math.abs(usageTxs.reduce((acc, t) => acc + (t.amount_dt < 0 ? t.amount_dt : -t.amount_dt), 0));
-  const totalUsageUsd = dtToUsd(totalUsageDt);
-  const totalUsageTnd = dtToTnd(totalUsageDt);
-
   return (
     <div className="space-y-6 max-w-6xl">
       {/* Header */}
@@ -115,187 +81,118 @@ export const CreditsPage = () => {
           <span className="text-[10px] text-fg-subtle uppercase tracking-widest">~/credits</span>
           <span className="text-brand">●</span>
         </div>
-        <h1 className="text-2xl font-bold tracking-tight">AI Credits & Billing</h1>
+        <h1 className="text-2xl font-bold tracking-tight">BUY AI CREDITS</h1>
         <p className="text-sm text-fg-muted mt-1">
-          Prepaid DT credits for AI model requests. 1 DT = $0.25 USD ({ (0.25 * USD_TO_TND).toFixed(3) } TND).
+          Credits-only payment system. Fixed rate: <strong>1 USD = 3 DT</strong> ($5 = 15 DT).
         </p>
       </div>
 
-      {/* Balance + Purchase notice */}
-      {(purchaseMsg || purchaseError) && (
-        <div className={`px-4 py-3 border rounded-md text-xs font-mono ${
-          purchaseError
-            ? 'border-red-500/40 bg-red-500/5 text-red-400'
-            : 'border-brand/40 bg-brand/5 text-fg'
-        }`}>
-          {purchaseError ?? purchaseMsg}
+      {purchaseError && (
+        <div className="px-4 py-3 border border-red-500/40 bg-red-500/5 text-red-400 rounded-md text-xs font-mono">
+          {purchaseError}
         </div>
       )}
 
-      {/* Balance Card & Real Usage Deducted */}
-      <div className="grid md:grid-cols-3 gap-4">
-        <Card accent className="md:col-span-2 p-6 scanlines flex flex-col justify-between">
+      {/* Credit Balance Card */}
+      <Card accent className="p-6 scanlines">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center justify-between mb-3">
-              <div className="text-[10px] font-bold uppercase tracking-widest text-fg-muted">
-                Current Active Balance
-              </div>
-              <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded border ${
-                hasCredits
-                  ? 'bg-brand/10 border-brand/30 text-brand'
-                  : 'bg-bg-subtle border-border text-fg-muted'
-              }`}>
-                <Zap size={12} />
-                <span className="text-[10px] font-bold uppercase tracking-wider">
-                  {hasCredits ? 'Account Active' : 'Free Tier'}
-                </span>
-              </div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-fg-muted mb-1">
+              Current Available AI Credits
             </div>
-
             <div className="flex items-baseline gap-3">
               <span className="text-5xl font-bold font-mono">
-                {balance.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                ${remainingUsd.toFixed(6)}
               </span>
-              <span className="text-brand font-bold text-2xl">DT</span>
+              <span className="text-brand font-bold text-xl">({remainingDt.toFixed(2)} DT)</span>
             </div>
-
-            <div className="text-sm font-bold text-fg mt-2 flex items-center gap-2 flex-wrap">
-              <span>≈ ${balanceUsd.toFixed(2)} USD</span>
-              <span className="text-brand">/</span>
-              <span className="text-brand">{balanceTnd.toFixed(2)} TND</span>
-              <span className="text-xs text-fg-subtle font-normal">(AI Usage Value)</span>
+            <div className="text-xs text-fg-muted mt-2">
+              Purchased: <span className="text-fg font-bold">${purchasedUsd.toFixed(2)}</span> · 
+              Usage Cost: <span className="text-red-400 font-bold">${usageUsd.toFixed(6)}</span>
             </div>
           </div>
 
-          <div className="mt-4 pt-3 border-t border-border/50 text-[10px] text-fg-subtle flex justify-between">
-            <span>Exchange Rate: 1 USD = {USD_TO_TND} TND</span>
-            <span>Credit Conversion: 1 DT = 0.25 USD</span>
-          </div>
-        </Card>
-
-        {/* Real Usage Deducted Summary Card */}
-        <Card className="p-6 flex flex-col justify-between">
-          <div>
-            <div className="flex items-center gap-2 mb-3">
-              <TrendingDown size={16} className="text-red-400" />
-              <span className="text-[10px] font-bold uppercase tracking-widest text-fg-muted">
-                Real AI Usage Deducted
-              </span>
-            </div>
-
-            <div className="space-y-2">
-              <div className="text-2xl font-bold font-mono text-red-400">
-                -{totalUsageDt.toFixed(2)} DT
-              </div>
-              <div className="text-xs text-fg font-bold">
-                -${totalUsageUsd.toFixed(3)} USD / -{totalUsageTnd.toFixed(3)} TND
-              </div>
-              <p className="text-[11px] text-fg-subtle">
-                Automatically reduced from your credit balance as API requests are executed.
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-4 pt-3 border-t border-border/50 text-[10px] text-fg-subtle">
-            {usageTxs.length} deduction transactions recorded
-          </div>
-        </Card>
-      </div>
-
-      {/* How credits work */}
-      <Card className="p-4">
-        <div className="flex items-start gap-3">
-          <Info size={14} className="text-brand shrink-0 mt-0.5" />
-          <div className="text-xs text-fg-muted leading-relaxed">
-            <strong className="text-fg">How usage deductions work:</strong> Every AI API request costs a tiny fraction of a credit based on token usage. 
-            Deductions immediately reduce your current balance in real time, tracked in both <strong className="text-fg">USD ($)</strong> and <strong className="text-brand">TND (Tunisian Dinar)</strong>.
+          <div className="flex flex-col items-end gap-2">
+            <Badge variant={hasCredits ? 'success' : 'error'} dot>
+              {hasCredits ? 'CREDITS ACTIVE' : 'NO CREDITS'}
+            </Badge>
+            <span className="text-[10px] text-fg-subtle">
+              Single Source of Truth: Backend Derived
+            </span>
           </div>
         </div>
       </Card>
 
-      {/* Buy Packages */}
+      {/* Requirement 8: Buy Credits Packages */}
       <div>
         <div className="flex items-center gap-2 mb-4">
           <div className="w-2 h-2 bg-brand" />
-          <span className="text-xs font-bold tracking-wider uppercase">Buy Credit Packages ($ & TND)</span>
+          <span className="text-xs font-bold tracking-wider uppercase">BUY AI CREDITS ($ → DT)</span>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-          {PACKAGES.map((pkg) => {
-            const usdVal = dtToUsd(pkg.dt);
-            const tndVal = dtToTnd(pkg.dt);
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {PACKAGES.map((pkg) => (
+            <Card
+              key={pkg.usd}
+              accent={pkg.popular}
+              hover
+              className={`p-5 flex flex-col justify-between relative ${pkg.popular ? 'ring-1 ring-brand/40' : ''}`}
+            >
+              {pkg.popular && (
+                <div className="absolute -top-2.5 left-1/2 -translate-x-1/2">
+                  <Badge variant="brand" className="text-[8px] px-2 py-0.5 whitespace-nowrap">
+                    Most Popular
+                  </Badge>
+                </div>
+              )}
 
-            return (
-              <Card
-                key={pkg.dt}
-                accent={pkg.popular}
-                hover
-                className={`p-4 flex flex-col relative ${pkg.popular ? 'ring-1 ring-brand/40' : ''}`}
+              <div className="text-center mb-4 mt-2">
+                <div className="text-3xl font-bold font-mono">${pkg.usd}</div>
+                <div className="text-sm font-bold text-brand mt-1">→ {pkg.dt} DT</div>
+                <div className="text-[10px] uppercase tracking-wider text-fg-subtle mt-1">
+                  Adds ${pkg.usd}.00 AI Balance
+                </div>
+              </div>
+
+              <div className="space-y-2 mb-4 text-[11px] text-fg-muted bg-bg-subtle/50 p-3 rounded border border-border">
+                <div className="flex justify-between">
+                  <span>Price:</span>
+                  <span className="font-bold text-fg">{pkg.dt} DT</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Credits Added:</span>
+                  <span className="font-bold text-brand">${pkg.usd}.00</span>
+                </div>
+              </div>
+
+              <button
+                onClick={() => handlePurchase(pkg.dt)}
+                disabled={purchasing !== null}
+                className={`w-full py-2.5 text-xs font-bold uppercase tracking-wider rounded btn-press transition-colors disabled:opacity-50 ${
+                  pkg.popular
+                    ? 'bg-brand text-black hover:bg-brand-hover'
+                    : 'border border-border hover:border-brand/40 hover:bg-brand/10'
+                }`}
               >
-                {pkg.popular && (
-                  <div className="absolute -top-2.5 left-1/2 -translate-x-1/2">
-                    <Badge variant="brand" className="text-[8px] px-2 py-0.5 whitespace-nowrap">
-                      Best Value
-                    </Badge>
-                  </div>
-                )}
-
-                <div className="text-center mb-3 mt-1">
-                  <div className="text-3xl font-bold">{pkg.dt}</div>
-                  <div className="text-[10px] uppercase tracking-widest text-brand font-bold">DT</div>
-                </div>
-
-                <div className="bg-bg-subtle border border-border rounded p-2 text-center mb-3 space-y-0.5">
-                  <div className="text-[9px] uppercase tracking-wider text-fg-muted">Usage Value</div>
-                  <div className="text-base font-bold text-fg">${usdVal.toFixed(2)} USD</div>
-                  <div className="text-xs font-bold text-brand">{tndVal.toFixed(2)} TND</div>
-                </div>
-
-                <ul className="space-y-1 mb-4 text-[10px] text-fg-muted">
-                  <li className="flex items-center gap-1"><Check size={9} className="text-brand" /> No expiration</li>
-                  <li className="flex items-center gap-1"><Check size={9} className="text-brand" /> All AI models</li>
-                  <li className="flex items-center gap-1"><Check size={9} className="text-brand" /> Auto deduction</li>
-                </ul>
-
-                <button
-                  onClick={() => handlePurchase(pkg.dt)}
-                  disabled={purchasing !== null}
-                  className={`w-full py-2 text-[10px] font-bold uppercase tracking-wider rounded btn-press transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                    pkg.popular
-                      ? 'bg-brand text-black hover:bg-brand-hover'
-                      : 'border border-border hover:border-brand/40 hover:bg-brand/10'
-                  }`}
-                >
-                  {purchasing === pkg.dt ? (
-                    <span className="flex items-center justify-center gap-1">
-                      <span className="animate-spin">⟳</span> Processing...
-                    </span>
-                  ) : (
-                    `Buy ${pkg.dt} DT`
-                  )}
-                </button>
-              </Card>
-            );
-          })}
+                {purchasing === pkg.dt ? 'Processing...' : `[ Buy $${pkg.usd} Credits ]`}
+              </button>
+            </Card>
+          ))}
         </div>
-
-        <p className="text-[10px] text-fg-subtle mt-3 text-center uppercase tracking-wider">
-          Prices displayed in USD and TND (Rate: 1 USD = {USD_TO_TND} TND)
-        </p>
       </div>
 
-      {/* Transaction History */}
+      {/* Requirement 10: Credit Transaction History */}
       <div>
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 bg-brand" />
-            <span className="text-xs font-bold tracking-wider uppercase">Transaction & Deduction History</span>
+            <span className="text-xs font-bold tracking-wider uppercase">CREDIT TRANSACTION HISTORY</span>
           </div>
           <button
             onClick={loadHistory}
             className="text-[10px] text-fg-muted hover:text-brand uppercase tracking-wider transition-colors"
           >
-            ↻ Refresh
+            ↻ Refresh Ledger
           </button>
         </div>
 
@@ -307,29 +204,23 @@ export const CreditsPage = () => {
           ) : transactions.length === 0 ? (
             <div className="p-8 text-center space-y-3">
               <Coins size={32} className="mx-auto text-fg-muted opacity-40" />
-              <div className="text-sm text-fg-muted">No transactions yet.</div>
-              <p className="text-xs text-fg-subtle">
-                Purchase a credit package above to start using AI models.
-              </p>
+              <div className="text-sm text-fg-muted">No credit transactions yet.</div>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="border-b border-border bg-bg-subtle">
-                    <th className="text-left px-4 py-3 text-[10px] font-bold uppercase tracking-wider text-fg-muted">Type</th>
-                    <th className="text-left px-4 py-3 text-[10px] font-bold uppercase tracking-wider text-fg-muted">Status</th>
-                    <th className="text-right px-4 py-3 text-[10px] font-bold uppercase tracking-wider text-fg-muted">Amount (DT)</th>
-                    <th className="text-right px-4 py-3 text-[10px] font-bold uppercase tracking-wider text-fg-muted">Value ($ / TND)</th>
-                    <th className="text-left px-4 py-3 text-[10px] font-bold uppercase tracking-wider text-fg-muted">Note</th>
-                    <th className="text-left px-4 py-3 text-[10px] font-bold uppercase tracking-wider text-fg-muted">Date</th>
+                  <tr className="border-b border-border bg-bg-subtle font-mono text-[10px] text-fg-muted uppercase">
+                    <th className="text-left px-4 py-3">Date</th>
+                    <th className="text-left px-4 py-3">Type</th>
+                    <th className="text-right px-4 py-3">Amount (DT)</th>
+                    <th className="text-right px-4 py-3">Credits ($)</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="font-mono">
                   {transactions.map((tx, i) => {
                     const isCredit = tx.amount_dt > 0;
-                    const usdVal = dtToUsd(Math.abs(tx.amount_dt));
-                    const tndVal = dtToTnd(Math.abs(tx.amount_dt));
+                    const creditsUsd = (Math.abs(tx.amount_dt) / DT_PER_USD).toFixed(6);
 
                     return (
                       <tr
@@ -338,45 +229,21 @@ export const CreditsPage = () => {
                           i % 2 === 0 ? 'bg-bg' : 'bg-bg-subtle/30'
                         }`}
                       >
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            {isCredit ? (
-                              <ArrowUpRight size={12} className="text-brand" />
-                            ) : (
-                              <ArrowDownRight size={12} className="text-red-400" />
-                            )}
-                            <span className={`font-medium ${TX_TYPE_COLORS[tx.type] ?? 'text-fg'}`}>
-                              {TX_TYPE_LABELS[tx.type] ?? tx.type}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                            tx.status === 'completed'
-                              ? 'bg-brand/10 text-brand border border-brand/30'
-                              : tx.status === 'pending'
-                                ? 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/30'
-                                : 'bg-red-500/10 text-red-400 border border-red-500/30'
-                          }`}>
-                            {tx.status === 'pending' && <Clock size={9} />}
-                            {tx.status}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono font-bold tabular-nums">
-                          <span className={isCredit ? 'text-brand' : 'text-red-400'}>
-                            {isCredit ? '+' : ''}{tx.amount_dt.toFixed(4)} DT
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono tabular-nums text-[11px]">
-                          <span className={isCredit ? 'text-fg font-bold' : 'text-fg-muted'}>
-                            {isCredit ? '+' : '-'}${usdVal.toFixed(3)} / {tndVal.toFixed(3)} TND
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-fg-muted max-w-[180px] truncate">
-                          {tx.admin_note ?? (tx.type === 'usage' ? 'CLI AI request' : '—')}
-                        </td>
                         <td className="px-4 py-3 text-fg-subtle whitespace-nowrap">
                           {formatDate(tx.created_at)}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`font-bold ${isCredit ? 'text-brand' : 'text-red-400'}`}>
+                            {tx.type === 'purchase' ? 'Credit Purchase' : tx.type === 'usage' ? 'AI Usage' : tx.type}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-bold">
+                          {isCredit ? `+${tx.amount_dt} DT` : '-'}
+                        </td>
+                        <td className="px-4 py-3 text-right font-bold">
+                          <span className={isCredit ? 'text-brand' : 'text-red-400'}>
+                            {isCredit ? `+$${creditsUsd}` : `-$${creditsUsd}`}
+                          </span>
                         </td>
                       </tr>
                     );
@@ -388,35 +255,51 @@ export const CreditsPage = () => {
         </Card>
       </div>
 
-      {/* Help CTA */}
-      <Card className="p-5 bg-brand/5 border-brand/20">
-        <div className="flex items-start gap-3">
-          <ShoppingCart size={16} className="text-brand mt-0.5 shrink-0" />
-          <div className="flex-1">
-            <div className="text-sm font-bold mb-1">Need custom billing or enterprise allocation?</div>
-            <p className="text-xs text-fg-muted">
-              Custom credit packages, invoicing in TND/USD, and dedicated support are available.
-            </p>
-          </div>
-          <a
-            href="mailto:billing@zencode.dev"
-            className="shrink-0 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider border border-brand/40 hover:bg-brand/10 rounded transition-colors btn-press"
-          >
-            Contact Us
-          </a>
-        </div>
-      </Card>
+      {/* Requirement 9: Pixel-Art / 3D Payment Receipt Modal */}
+      <Modal open={!!receipt} onClose={() => setReceipt(null)} title="PAYMENT RECEIPT" size="md">
+        {receipt && (
+          <div className="space-y-4 scanlines p-2 font-mono">
+            {/* Pixel Art Header */}
+            <div className="text-center border-b border-brand/30 pb-4">
+              <div className="text-brand font-bold text-lg tracking-widest">▲ ZENCODE ▲</div>
+              <div className="text-xs uppercase tracking-widest text-fg-muted mt-1">CREDIT PURCHASE RECEIPT</div>
+              <div className="text-[10px] text-fg-subtle mt-1">{formatDate(receipt.date)}</div>
+            </div>
 
-      {/* Bottom decoration */}
-      <div className="flex items-center justify-center gap-1 text-brand text-[10px] font-mono opacity-40">
-        <span>▓</span>
-        <span>▒</span>
-        <span>░</span>
-        <span className="px-2">END OF CREDITS</span>
-        <span>░</span>
-        <span>▒</span>
-        <span>▓</span>
-      </div>
+            <div className="space-y-3 text-xs bg-bg-subtle border border-brand/20 p-4 rounded-md">
+              <div className="flex justify-between border-b border-border/40 pb-2">
+                <span className="text-fg-muted uppercase">Amount Paid:</span>
+                <span className="font-bold text-brand">{receipt.amount_paid_dt} DT</span>
+              </div>
+              <div className="flex justify-between border-b border-border/40 pb-2">
+                <span className="text-fg-muted uppercase">Credits Added:</span>
+                <span className="font-bold text-brand">+${receipt.credits_added_usd.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between border-b border-border/40 pb-2">
+                <span className="text-fg-muted uppercase">Previous Balance:</span>
+                <span className="text-fg-subtle">${receipt.previous_balance_usd.toFixed(6)}</span>
+              </div>
+              <div className="flex justify-between border-b border-border/40 pb-2">
+                <span className="text-fg-muted uppercase">New Balance:</span>
+                <span className="font-bold text-fg">${receipt.new_balance_usd.toFixed(6)}</span>
+              </div>
+              <div className="flex justify-between pt-1 text-[11px]">
+                <span className="text-fg-muted uppercase">Transaction ID:</span>
+                <span className="text-brand font-bold uppercase">{receipt.transaction_id.slice(0, 8)}…</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end pt-2">
+              <button
+                onClick={() => setReceipt(null)}
+                className="w-full py-2.5 bg-brand text-black text-xs font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press"
+              >
+                [ CLOSE RECEIPT ]
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 };

@@ -9,7 +9,6 @@ import { useAuth } from '@/hooks/useAuth';
 import { Link } from 'react-router-dom';
 
 type Range = '7' | '30' | '90';
-const USD_TO_TND = 3.10;
 
 export const UsagePage = () => {
   const { user } = useAuth();
@@ -48,7 +47,6 @@ export const UsagePage = () => {
     inputTokens: number;
     outputTokens: number;
     costUsd: number;
-    costTnd: number;
   }[] = [];
 
   let totalRequests = 0;
@@ -65,7 +63,6 @@ export const UsagePage = () => {
     const inputTokens = item?.input_tokens ?? 0;
     const outputTokens = item?.output_tokens ?? 0;
     const costUsd = item?.cost_usd ?? 0;
-    const costTnd = costUsd * USD_TO_TND;
 
     totalRequests += requests;
     totalInputTokens += inputTokens;
@@ -82,46 +79,45 @@ export const UsagePage = () => {
       inputTokens,
       outputTokens,
       costUsd,
-      costTnd,
     });
   }
 
   const totalTokens = totalInputTokens + totalOutputTokens;
-  const totalCostTnd = totalCostUsd * USD_TO_TND;
   const maxRequests = Math.max(1, ...chartSeries.map((d) => d.requests));
 
-  const creditBalance = user?.credit_balance_dt ?? 0;
-  const creditUsd = user?.credit_balance_usd_value ?? 0;
-  const creditTnd = creditUsd * USD_TO_TND;
-  const hasCredits = user?.has_credits ?? false;
+  // Single source of truth billing fields
+  const remainingUsd = user?.remaining_credits ?? 0;
+  const remainingDt = user?.remaining_credits_dt ?? (remainingUsd * 3);
+  const purchasedUsd = user?.total_credits_purchased ?? 0;
+  const usageCostUsd = user?.total_usage_cost ?? totalCostUsd;
 
   const stats = [
     {
       label: 'Total Requests',
-      value: formatNumber(totalRequests),
-      subtext: `Last ${range} days`,
+      value: formatNumber(user?.total_requests ?? totalRequests),
+      subtext: `All-time requests`,
       icon: Activity,
       color: 'text-brand',
     },
     {
       label: 'Total Tokens',
-      value: formatTokens(totalTokens),
-      subtext: `${formatTokens(totalInputTokens)} in · ${formatTokens(totalOutputTokens)} out`,
+      value: formatTokens(user?.total_tokens ?? totalTokens),
+      subtext: `${formatTokens(user?.input_tokens ?? totalInputTokens)} in · ${formatTokens(user?.output_tokens ?? totalOutputTokens)} out`,
       icon: Coins,
       color: 'text-brand',
     },
     {
-      label: 'Est. Cost (USD)',
-      value: `$${totalCostUsd.toFixed(3)}`,
-      subtext: 'Real AI model cost',
+      label: 'Total Usage Cost',
+      value: `$${usageCostUsd.toFixed(6)}`,
+      subtext: 'Real model pricing',
       icon: DollarSign,
       color: 'text-brand',
     },
     {
-      label: 'Est. Cost (TND)',
-      value: `${totalCostTnd.toFixed(3)} TND`,
-      subtext: `Rate: 1 USD = ${USD_TO_TND} TND`,
-      icon: DollarSign,
+      label: 'Remaining Credits',
+      value: `$${remainingUsd.toFixed(6)}`,
+      subtext: `≈ ${remainingDt.toFixed(2)} DT`,
+      icon: Zap,
       color: 'text-brand',
     },
   ];
@@ -134,7 +130,7 @@ export const UsagePage = () => {
           <div className="text-[10px] text-fg-subtle uppercase tracking-widest mb-1">~/usage</div>
           <h1 className="text-2xl font-bold tracking-tight">Real Usage Analytics</h1>
           <p className="text-sm text-fg-muted mt-1">
-            Real-time tracking of requests, token consumption, and cost in USD and TND.
+            Real-time tracking of requests, token consumption, and cost in USD.
           </p>
         </div>
         <div className="flex items-center gap-1">
@@ -160,28 +156,22 @@ export const UsagePage = () => {
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <Zap size={14} className="text-brand" />
-              <span className="text-xs font-bold uppercase tracking-wider">Remaining Account Credits</span>
+              <span className="text-xs font-bold uppercase tracking-wider">Available AI Credits</span>
             </div>
             <div className="flex items-baseline gap-3 pt-1">
               <span className="text-3xl font-bold font-mono">
-                {creditBalance.toFixed(1)} <span className="text-brand text-lg font-bold">DT</span>
-              </span>
-              <span className="text-sm text-fg font-bold">
-                ≈ ${creditUsd.toFixed(2)} USD
-              </span>
-              <span className="text-sm text-brand font-bold">
-                / {creditTnd.toFixed(2)} TND
+                ${remainingUsd.toFixed(6)} <span className="text-brand text-lg font-bold">({remainingDt.toFixed(2)} DT)</span>
               </span>
             </div>
             <p className="text-[11px] text-fg-muted">
-              Usage fees are automatically deducted from your active credit balance.
+              Purchased: ${purchasedUsd.toFixed(2)} · Usage: ${usageCostUsd.toFixed(6)} · Remaining: ${remainingUsd.toFixed(6)}
             </p>
           </div>
           <Link
             to="/app/credits"
             className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-brand text-black text-xs font-bold uppercase tracking-wider rounded hover:bg-brand-hover btn-press shrink-0"
           >
-            Buy More Credits <ArrowUpRight size={14} />
+            Buy Credits <ArrowUpRight size={14} />
           </Link>
         </div>
       </Card>
@@ -276,7 +266,7 @@ export const UsagePage = () => {
             <div className="w-2 h-2 bg-brand" />
             <span className="text-xs font-bold tracking-wider uppercase">Daily Usage History</span>
           </div>
-          <span className="text-[10px] text-fg-subtle uppercase">Cost in USD ($) & TND</span>
+          <span className="text-[10px] text-fg-subtle uppercase">Cost in USD ($)</span>
         </div>
         <Table>
           <Thead>
@@ -286,7 +276,6 @@ export const UsagePage = () => {
               <Th align="right">Input Tokens</Th>
               <Th align="right">Output Tokens</Th>
               <Th align="right">Cost (USD)</Th>
-              <Th align="right">Cost (TND)</Th>
             </Tr>
           </Thead>
           <Tbody>
@@ -305,7 +294,6 @@ export const UsagePage = () => {
             ) : (
               dailyData.map((d) => {
                 const costUsd = d.cost_usd ?? 0;
-                const costTnd = costUsd * USD_TO_TND;
                 return (
                   <Tr key={d.day}>
                     <Td>
@@ -318,11 +306,8 @@ export const UsagePage = () => {
                     </Td>
                     <Td align="right" className="font-mono">{formatTokens(d.input_tokens)}</Td>
                     <Td align="right" className="font-mono">{formatTokens(d.output_tokens)}</Td>
-                    <Td align="right" className="text-fg font-mono font-bold">
-                      ${costUsd.toFixed(4)}
-                    </Td>
                     <Td align="right" className="text-brand font-mono font-bold">
-                      {costTnd.toFixed(4)} TND
+                      ${costUsd.toFixed(6)}
                     </Td>
                   </Tr>
                 );

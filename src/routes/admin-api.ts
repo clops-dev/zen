@@ -14,6 +14,8 @@ import {
   getPendingPaymentDemands,
   confirmPaymentDemand,
   rejectPaymentDemand,
+  getUserBillingSummary,
+  getAdminBillingOverview,
 } from "../lib/credits"
 
 export const adminApi = new Hono()
@@ -160,13 +162,8 @@ adminApi.get("/users", async (c) => {
   try {
     const rows = await sql`
       SELECT u.id, u.email, u.role, u.created_at,
-             s.tier, s.status AS subscription_status, s.token_budget_monthly,
-             s.spending_cap_usd, s.spending_cap_enabled, s.spending_cap_period,
-             COALESCE((SELECT count(*) FROM api_keys WHERE user_id = u.id AND revoked = false), 0) AS active_keys,
-             COALESCE((SELECT count(*) FROM ai_requests WHERE user_id = u.id), 0) AS total_requests,
-             COALESCE((SELECT sum(cost_usd) FROM ai_requests WHERE user_id = u.id), 0) AS total_cost
+             COALESCE((SELECT count(*) FROM api_keys WHERE user_id = u.id AND revoked = false), 0) AS active_keys
         FROM users u
-        LEFT JOIN subscriptions s ON s.user_id = u.id
        WHERE u.email ILIKE ${"%" + q + "%"} OR u.role ILIKE ${"%" + q + "%"}
        ORDER BY u.created_at DESC
        LIMIT ${limit}
@@ -174,39 +171,53 @@ adminApi.get("/users", async (c) => {
     const lastLogin = await sql`SELECT user_id, max(last_used_at) AS last_used_at FROM api_keys GROUP BY user_id`
     const lastMap = new Map(lastLogin.map((r: any) => [r.user_id, r.last_used_at]))
 
-    const monthlyCosts = await sql`
-      SELECT user_id, COALESCE(sum(total_cost_usd), 0) AS month_cost
-      FROM monthly_usage
-      WHERE month = ${monthStart()}
-      GROUP BY user_id
-    `
-    const monthCostMap = new Map(monthlyCosts.map((r: any) => [r.user_id, Number(r.month_cost)]))
+    const userSummaries = await Promise.all(
+      rows.map(async (r: any) => {
+        const billing = await getUserBillingSummary(r.id)
+        return {
+          id: r.id,
+          email: r.email,
+          role: r.role,
+          created_at: r.created_at,
+          active_keys: Number(r.active_keys),
+          last_login_at: lastMap.get(r.id) ?? null,
+          // Single Source of Truth Billing Fields for Admin Table
+          credits_purchased: billing.total_credits_purchased,
+          credits_purchased_dt: billing.total_credits_purchased_dt,
+          usage_cost: billing.total_usage_cost,
+          remaining_credits: billing.remaining_credits,
+          remaining_credits_dt: billing.remaining_credits_dt,
+          requests: billing.total_requests,
+          input_tokens: billing.input_tokens,
+          output_tokens: billing.output_tokens,
+          tokens: billing.total_tokens,
+        }
+      })
+    )
 
-    const users = rows.map((r: any) => {
-      const capEnabled = Boolean(r.spending_cap_enabled)
-      const capUsd = r.spending_cap_usd != null ? Number(Number(r.spending_cap_usd).toFixed(4)) : null
-      const currentUsageUsd = Number((monthCostMap.get(r.id) ?? 0).toFixed(4))
-      let remainingUsd: number | null = null
-      let limitStatus = "unlimited"
-      if (capEnabled && capUsd !== null) {
-        remainingUsd = Math.max(0, Number((capUsd - currentUsageUsd).toFixed(4)))
-        limitStatus = currentUsageUsd >= capUsd ? "limit_reached" : "within_limit"
-      }
-      return {
-        ...r,
-        last_login_at: lastMap.get(r.id) ?? null,
-        spending_cap_usd: capUsd,
-        spending_cap_enabled: capEnabled,
-        spending_cap_period: r.spending_cap_period ?? "monthly",
-        current_usage_usd: currentUsageUsd,
-        remaining_cap_usd: remainingUsd,
-        limit_status: limitStatus,
-      }
-    })
-
-    return c.json({ users })
+    return c.json({ users: userSummaries })
   } catch (err) {
     return jsonError(c, 500, "users_list_failed", err instanceof Error ? err.message : String(err))
+  }
+})
+
+adminApi.get("/billing", async (c) => {
+  try {
+    const overview = await getAdminBillingOverview()
+    return c.json(overview)
+  } catch (err) {
+    return jsonError(c, 500, "admin_billing_failed", err instanceof Error ? err.message : String(err))
+  }
+})
+
+adminApi.get("/users/:id/billing", async (c) => {
+  const userId = c.req.param("id")
+  try {
+    const summary = await getUserBillingSummary(userId)
+    const txs = await getTransactionHistory(userId, 50)
+    return c.json({ summary, transactions: txs })
+  } catch (err) {
+    return jsonError(c, 500, "user_billing_failed", err instanceof Error ? err.message : String(err))
   }
 })
 

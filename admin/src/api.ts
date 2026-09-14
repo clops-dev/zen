@@ -145,19 +145,30 @@ export type User = {
   email: string
   role: "admin" | "user"
   created_at: string
-  tier: string
-  subscription_status: string
-  token_budget_monthly: number
-  spending_cap_usd?: number | null
-  spending_cap_enabled?: boolean
-  spending_cap_period?: string
-  current_usage_usd?: number
-  remaining_cap_usd?: number | null
-  limit_status?: "within_limit" | "limit_reached" | "unlimited"
   active_keys: number
-  total_requests: number
-  total_cost: number | string
   last_login_at: string | null
+  // Single Source of Truth Billing Fields
+  credits_purchased: number
+  credits_purchased_dt: number
+  usage_cost: number
+  remaining_credits: number
+  remaining_credits_dt: number
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  tokens: number
+}
+
+export type AdminBillingOverview = {
+  total_credit_sales_dt: number
+  total_credits_sold_usd: number
+  total_ai_usage_cost_usd: number
+  gross_margin_usd: number
+  total_users: number
+}
+
+export function getAdminBilling() {
+  return request<AdminBillingOverview>("/admin-api/billing")
 }
 
 export type ApiKeyRow = {
