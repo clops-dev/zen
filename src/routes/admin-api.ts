@@ -4,7 +4,7 @@ import { sql, withDbResilience } from "../lib/db"
 import { requireAdmin } from "../middleware/session-auth"
 import { audit, actorEmailFor } from "../lib/audit"
 import { fetchOpenRouterModelMetadata } from "../lib/openrouter"
-import { getUserSpending, monthStart } from "../lib/quota"
+
 import {
   getBalance,
   getTransactionHistory,
@@ -531,24 +531,16 @@ adminApi.get("/users/:id", async (c) => {
   try {
     const id = c.req.param("id")
     const [u] = await sql`
-      SELECT u.id, u.email, u.role, u.created_at,
-             s.tier, s.status, s.token_budget_monthly,
-             s.spending_cap_usd, s.spending_cap_enabled, s.spending_cap_period
-        FROM users u LEFT JOIN subscriptions s ON s.user_id = u.id WHERE u.id = ${id}
+      SELECT u.id, u.email, u.role, u.created_at
+        FROM users u WHERE u.id = ${id}
     `
     if (!u) return jsonError(c, 404, "not_found")
-    const spending = await getUserSpending(id)
-    const [usage] = await sql`
-      SELECT COALESCE(sum(input_tokens + output_tokens), 0) AS tokens,
-             COALESCE(sum(cost_usd), 0) AS cost,
-             count(*) AS requests
-        FROM ai_requests WHERE user_id = ${u.id}
-    `
+    const billing = await getUserBillingSummary(id)
     const keys = await sql`
       SELECT id, key_prefix, label, created_at, last_used_at, revoked
         FROM api_keys WHERE user_id = ${u.id} ORDER BY created_at DESC
     `
-    return c.json({ user: { ...u, ...spending }, usage, keys })
+    return c.json({ user: { ...u, ...billing }, usage: billing, keys })
   } catch (err) {
     return jsonError(c, 500, "user_get_failed", err instanceof Error ? err.message : String(err))
   }
