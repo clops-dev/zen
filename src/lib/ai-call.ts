@@ -751,7 +751,7 @@ function makeToolCallNormalizingFetch(customFetch: (input: any, init?: any) => P
       if (chatRes.ok) {
         return chatRes
       }
-      return responsesRes
+      return chatRes
     }
 
     let res = await customFetch(input, init)

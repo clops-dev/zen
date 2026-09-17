@@ -496,188 +496,204 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   }
 
   // ---- streaming: peek each candidate for real output before committing to the client ----
-  try {
-    for (let attempt = 0; attempt < MAX_FALLBACK_ATTEMPTS; attempt++) {
-      const target: RouteTarget | null = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements)
-      if (!target) break
-      tried.add(target.modelRowId)
+  const encoder = new TextEncoder()
+  const clientStream = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(encoder.encode(": gateway connected, processing prompt...\n\n"))
 
-      const { response, started: streamStarted, done } = callStreaming(
-        target, messages as any, maxOutputTokens, temperature, target.label, tools, tool_choice,
-      )
-      const startResult = await streamStarted
+      try {
+        for (let attempt = 0; attempt < MAX_FALLBACK_ATTEMPTS; attempt++) {
+          const target: RouteTarget | null = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements)
+          if (!target) break
+          tried.add(target.modelRowId)
 
-      if (!startResult.ok) {
-        const classification = classifyProviderError(startResult.error)
-        const latencyMs = Date.now() - started
-        const rejectReason = (startResult.error as UpstreamTimeoutError)?.rejectReason
-        const extras = rejectionExtras(startResult.error)
-        console.error(
-          `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
-          `latencyMs=${latencyMs} status=${classification.action}:${classification.kind}` +
-          (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
-          (rejectReason ? ` timeout=${rejectReason}` : "") +
-          extras,
-          startResult.error,
-        )
-        if (classification.action === "break_loop" && classification.kind === "bad_request") {
-          logMessageDiagnostics(messages as any[], "incoming_request")
+          if (attempt > 0) {
+            controller.enqueue(encoder.encode(`: retrying prompt with ${target.label}...\n\n`))
+          }
+
+          const { response, started: streamStarted, done } = callStreaming(
+            target, messages as any, maxOutputTokens, temperature, target.label, tools, tool_choice,
+          )
+          const startResult = await streamStarted
+
+          if (!startResult.ok) {
+            const classification = classifyProviderError(startResult.error)
+            const latencyMs = Date.now() - started
+            const rejectReason = (startResult.error as UpstreamTimeoutError)?.rejectReason
+            const extras = rejectionExtras(startResult.error)
+            console.error(
+              `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
+              `latencyMs=${latencyMs} status=${classification.action}:${classification.kind}` +
+              (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
+              (rejectReason ? ` timeout=${rejectReason}` : "") +
+              extras,
+              startResult.error,
+            )
+            if (classification.action === "break_loop" && classification.kind === "bad_request") {
+              logMessageDiagnostics(messages as any[], "incoming_request")
+            }
+            lastErr = startResult.error
+            bg(reportRouteOutcome(target.providerId, { success: false, error: startResult.error }))
+            bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(startResult.error), requestId: reqId }))
+            if (classification.action === "break_loop") {
+              breakLoopErr = startResult.error
+              break
+            }
+            continue
+          }
+
+          // Committed — this target actually produced output, stream its response to the client.
+          console.log(`[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} stream=committed firstTokenReceived=true elapsedMs=${Date.now() - started}`)
+          bg((async () => {
+            try {
+              const result = await done
+              const latencyMs = Date.now() - started
+              const cost = calcCost({
+                inputPricePer1M: target.inputPricePer1M,
+                outputPricePer1M: target.outputPricePer1M,
+                inputTokens: result.inputTokens,
+                outputTokens: result.outputTokens,
+                inputCacheReadPricePer1M: target.inputCacheReadPricePer1M,
+                inputCacheWritePricePer1M: target.inputCacheWritePricePer1M,
+                requestPriceFlat: target.requestPriceFlat,
+                cachedTokens: (result as any).cachedTokens ?? 0,
+              })
+              await reportRouteOutcome(target.providerId, true)
+              await recordUsage(user.id, result.inputTokens, result.outputTokens, cost)
+              await recordRequest({
+                userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
+                inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
+                latencyMs, status: "success", requestId: reqId,
+              })
+              // Deduct from credit balance if cost > 0.
+              if (cost > 0) {
+                try {
+                  await deductCredits(user.id, usdToDt(cost), reqId)
+                } catch (err) {
+                  if (err instanceof InsufficientCreditsError) {
+                    console.warn(`[gateway] stream credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
+                  } else {
+                    console.error("[gateway] stream credit deduction error:", err)
+                  }
+                }
+              }
+              await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
+            } catch (err) {
+              const isClientCancel =
+                (err instanceof Error && (
+                  err.message.includes("stream cancelled by client") ||
+                  err.message.includes("cancelled by client") ||
+                  err.name === "AbortError"
+                )) ||
+                (typeof err === "string" && (err.includes("stream cancelled by client") || err.includes("cancelled by client")))
+
+              const classification = classifyProviderError(err)
+              const rejectReason = (err as UpstreamTimeoutError)?.rejectReason
+              console.error(
+                `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
+                `status=${classification.action}:${classification.kind}` +
+                (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
+                (rejectReason ? ` timeout=${rejectReason}` : "") +
+                ` stage=mid_stream`,
+                err,
+              )
+              if (!isClientCancel) {
+                await reportRouteOutcome(target.providerId, { success: false, error: err })
+              }
+              await recordRequest({
+                userId: user.id,
+                ip,
+                modelLabel: target.label,
+                promptHash: cacheKey,
+                status: "failure",
+                rejectReason: isClientCancel ? "client_cancelled" : ("mid_stream_failure: " + failureReason(err)),
+                requestId: reqId,
+              })
+            }
+          })())
+
+          const reader = response.body!.getReader()
+          try {
+            while (true) {
+              const { value, done: isStreamDone } = await reader.read()
+              if (isStreamDone) break
+              controller.enqueue(value)
+            }
+          } finally {
+            reader.releaseLock()
+          }
+
+          controller.close()
+          return
         }
-        lastErr = startResult.error
-        bg(reportRouteOutcome(target.providerId, { success: false, error: startResult.error }))
-        bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(startResult.error), requestId: reqId }))
-        if (classification.action === "break_loop") {
-          breakLoopErr = startResult.error
-          break
+      } catch (err) {
+        if (err instanceof ContextWindowExceededError) {
+          bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `context_window_exceeded: required=${err.requiredTokens}, largest=${err.largestAvailable}` }))
+          const body = `data: ${JSON.stringify({
+            error: "context_window_exceeded",
+            message: err.message,
+            required_tokens: err.requiredTokens,
+            largest_context_window: err.largestAvailable,
+            tier: err.tier,
+          })}\n\ndata: [DONE]\n\n`
+          controller.enqueue(encoder.encode(body))
+          controller.close()
+          return
         }
-        continue
+        if (err instanceof UnsupportedCapabilityError) {
+          const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
+          bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}` }))
+          const body = `data: ${JSON.stringify({
+            error: errCode,
+            message: err.message,
+            missing_capabilities: err.missingCapabilities,
+            tier: err.tier,
+          })}\n\ndata: [DONE]\n\n`
+          controller.enqueue(encoder.encode(body))
+          controller.close()
+          return
+        }
+        throw err
       }
 
-      // Committed — this target actually produced output, hand its response to the real client.
-      console.log(`[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} stream=committed firstTokenReceived=true elapsedMs=${Date.now() - started}`)
-      bg((async () => {
-        try {
-          const result = await done
-          const latencyMs = Date.now() - started
-          const cost = calcCost({
-            inputPricePer1M: target.inputPricePer1M,
-            outputPricePer1M: target.outputPricePer1M,
-            inputTokens: result.inputTokens,
-            outputTokens: result.outputTokens,
-            inputCacheReadPricePer1M: target.inputCacheReadPricePer1M,
-            inputCacheWritePricePer1M: target.inputCacheWritePricePer1M,
-            requestPriceFlat: target.requestPriceFlat,
-            cachedTokens: (result as any).cachedTokens ?? 0,
-          })
-          await reportRouteOutcome(target.providerId, true)
-          await recordUsage(user.id, result.inputTokens, result.outputTokens, cost)
-          await recordRequest({
-            userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
-            inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
-            latencyMs, status: "success", requestId: reqId,
-          })
-          // Deduct from credit balance if cost > 0.
-          if (cost > 0) {
-            try {
-              await deductCredits(user.id, usdToDt(cost), reqId)
-            } catch (err) {
-              if (err instanceof InsufficientCreditsError) {
-                console.warn(`[gateway] stream credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
-              } else {
-                console.error("[gateway] stream credit deduction error:", err)
-              }
-            }
-          }
-          await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
-        } catch (err) {
-          const isClientCancel =
-            (err instanceof Error && (
-              err.message.includes("stream cancelled by client") ||
-              err.message.includes("cancelled by client") ||
-              err.name === "AbortError"
-            )) ||
-            (typeof err === "string" && (err.includes("stream cancelled by client") || err.includes("cancelled by client")))
+      if (breakLoopErr) {
+        const classification = classifyProviderError(breakLoopErr)
+        bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `non_retryable: ${failureReason(breakLoopErr)}` }))
+        const readableMessage = classification.kind === "content_policy_violation" ? "Your request was rejected for violating safety policies." :
+                                classification.kind === "unsupported_parameter" ? "Your request contained an unsupported parameter or feature." :
+                                classification.kind === "context_length_exceeded" ? "Your request is too long for this model." :
+                                "Your request was rejected by the AI provider. Please check your prompt and attachments.";
+        const sseBody = `data: ${JSON.stringify({
+          error: "UPSTREAM_REJECTED_REQUEST",
+          message: readableMessage,
+          classification: classification.kind,
+          upstream_status: classification.statusCode ?? null,
+        })}\n\ndata: [DONE]\n\n`
+        controller.enqueue(encoder.encode(sseBody))
+        controller.close()
+        return
+      }
 
-          const classification = classifyProviderError(err)
-          const rejectReason = (err as UpstreamTimeoutError)?.rejectReason
-          console.error(
-            `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
-            `status=${classification.action}:${classification.kind}` +
-            (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
-            (rejectReason ? ` timeout=${rejectReason}` : "") +
-            ` stage=mid_stream`,
-            err,
-          )
-          if (!isClientCancel) {
-            await reportRouteOutcome(target.providerId, { success: false, error: err })
-          }
-          await recordRequest({
-            userId: user.id,
-            ip,
-            modelLabel: target.label,
-            promptHash: cacheKey,
-            status: "failure",
-            rejectReason: isClientCancel ? "client_cancelled" : ("mid_stream_failure: " + failureReason(err)),
-            requestId: reqId,
-          })
-        }
-      })())
-
-      return response
-    }
-  } catch (err) {
-    if (err instanceof ContextWindowExceededError) {
-      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `context_window_exceeded: required=${err.requiredTokens}, largest=${err.largestAvailable}` }))
-      // Streaming clients: emit a single SSE error event then [DONE], so
-      // EventSource consumers (Kilo, web UIs) can display a clean message
-      // instead of silently closing the stream.
-      const body = `data: ${JSON.stringify({
-        error: "context_window_exceeded",
-        message: err.message,
-        required_tokens: err.requiredTokens,
-        largest_context_window: err.largestAvailable,
-        tier: err.tier,
+      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "all_fallback_attempts_failed" }))
+      const errorType = tried.size === 0 ? "NO_PROVIDERS_CONFIGURED" : "ALL_PROVIDERS_FAILED"
+      const message = tried.size === 0 ? "No AI providers configured — add one in the admin dashboard" : "All AI providers are currently unavailable. Please try again later."
+      const lastClassification = lastErr ? classifyProviderError(lastErr) : null
+      const hint = lastClassification ? hintForClassification(lastClassification) : "No AI providers responded successfully."
+      const sseBody = `data: ${JSON.stringify({
+        error: errorType,
+        message: message,
+        hint,
+        last_failure: lastClassification
+          ? { kind: lastClassification.kind, action: lastClassification.action, statusCode: lastClassification.statusCode ?? null }
+          : null,
       })}\n\ndata: [DONE]\n\n`
-      return new Response(body, {
-        status: 413,
-        headers: SSE_HEADERS,
-      })
+      controller.enqueue(encoder.encode(sseBody))
+      controller.close()
     }
-    if (err instanceof UnsupportedCapabilityError) {
-      const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
-      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}` }))
-      const body = `data: ${JSON.stringify({
-        error: errCode,
-        message: err.message,
-        missing_capabilities: err.missingCapabilities,
-        tier: err.tier,
-      })}\n\ndata: [DONE]\n\n`
-      return new Response(body, {
-        status: 400,
-        headers: SSE_HEADERS,
-      })
-    }
-    throw err
-  }
+  })
 
-  // If the loop exited because the last attempt hit a break_loop error,
-  // surface it to the client as an SSE error event (mirroring the
-  // context-window 413 SSE shape) with a 4xx status.
-  if (breakLoopErr) {
-    const classification = classifyProviderError(breakLoopErr)
-    const status = breakLoopStatus(classification)
-    bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `non_retryable: ${failureReason(breakLoopErr)}` }))
-    const readableMessage = classification.kind === "content_policy_violation" ? "Your request was rejected for violating safety policies." :
-                            classification.kind === "unsupported_parameter" ? "Your request contained an unsupported parameter or feature." :
-                            classification.kind === "context_length_exceeded" ? "Your request is too long for this model." :
-                            "Your request was rejected by the AI provider. Please check your prompt and attachments.";
-    const sseBody = `data: ${JSON.stringify({
-      error: "UPSTREAM_REJECTED_REQUEST",
-      message: readableMessage,
-      classification: classification.kind,
-      upstream_status: classification.statusCode ?? null,
-    })}\n\ndata: [DONE]\n\n`
-    return new Response(sseBody, {
-      status,
-      headers: SSE_HEADERS,
-    })
-  }
-
-  bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "all_fallback_attempts_failed" }))
-  const errorType = tried.size === 0 ? "NO_PROVIDERS_CONFIGURED" : "ALL_PROVIDERS_FAILED"
-  const message = tried.size === 0 ? "No AI providers configured — add one in the admin dashboard" : "All AI providers are currently unavailable. Please try again later."
-  const lastClassification = lastErr ? classifyProviderError(lastErr) : null
-  const hint = lastClassification ? hintForClassification(lastClassification) : "No AI providers responded successfully."
-  const sseBody = `data: ${JSON.stringify({
-    error: errorType,
-    message: message,
-    hint,
-    last_failure: lastClassification
-      ? { kind: lastClassification.kind, action: lastClassification.action, statusCode: lastClassification.statusCode ?? null }
-      : null,
-  })}\n\ndata: [DONE]\n\n`
-  return new Response(sseBody, {
-    status: tried.size === 0 ? 503 : 502,
+  return new Response(clientStream, {
+    status: 200,
     headers: SSE_HEADERS,
   })
 })

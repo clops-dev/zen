@@ -103,8 +103,8 @@ describe("defaultReserveFor", () => {
     expect(defaultReserveFor(8192)).toBe(2048)
     // 32768 * 0.2 = 6553.6 → floor 6553. max(2048, 6553) = 6553
     expect(defaultReserveFor(32768)).toBe(6553)
-    // 200000 * 0.2 = 40000. max(2048, 40000) = 40000
-    expect(defaultReserveFor(200000)).toBe(40000)
+    // 200000 * 0.2 = 40000, capped at 8192 max reserve
+    expect(defaultReserveFor(200000)).toBe(8192)
   })
 
   test("uses 2048 floor for windows where 20% would be smaller", () => {

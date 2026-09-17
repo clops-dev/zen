@@ -170,7 +170,7 @@ function toTarget(c: Candidate): RouteTarget {
 }
 
 export function defaultReserveFor(contextWindow: number): number {
-  return Math.max(2048, Math.floor(contextWindow * 0.2))
+  return Math.max(2048, Math.min(8192, Math.floor(contextWindow * 0.2)))
 }
 
 export function candidateFitsContext(

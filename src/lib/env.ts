@@ -117,7 +117,7 @@ function intEnv(name: string, fallback: number): number {
 export const env = {
   ...parsed,
   get UPSTREAM_TIMEOUT_MS_NON_STREAMING() {
-    return intEnv("UPSTREAM_TIMEOUT_MS_NON_STREAMING", 30_000)
+    return intEnv("UPSTREAM_TIMEOUT_MS_NON_STREAMING", 120_000)
   },
   /** @deprecated Streaming no longer uses a fixed deadline; kept for backward
    * compat only. The four streaming timers (connect / firstToken / idle /

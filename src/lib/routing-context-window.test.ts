@@ -85,4 +85,15 @@ describe("defaultReserveFor + candidateFitsContext together", () => {
     expect(candidateFitsContext({ context_window: win }, 2048, sink)).toBe(true)
     expect(candidateFitsContext({ context_window: win }, 2049, sink)).toBe(false)
   })
+
+  test("large window caps reserve at 8192 allowing 105k prompt in 128k window", () => {
+    const win = 128000
+    const reserve = defaultReserveFor(win)
+    expect(reserve).toBe(8192)
+    const usable = win - reserve // 119808
+    const sink = { value: null as number | null }
+    expect(candidateFitsContext({ context_window: win }, 105000, sink)).toBe(true)
+    expect(candidateFitsContext({ context_window: win }, usable, sink)).toBe(true)
+    expect(candidateFitsContext({ context_window: win }, usable + 1, sink)).toBe(false)
+  })
 })
