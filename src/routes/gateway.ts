@@ -226,7 +226,14 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   const body = await c.req.json().catch(() => null)
   const parsed = chatCompletionsSchema.safeParse(body)
   if (!parsed.success) {
-    return c.json({ error: "invalid payload", details: parsed.error.flatten() }, 400)
+    return c.json({
+      error: {
+        message: "invalid payload",
+        type: "invalid_request_error",
+        code: "invalid_payload",
+        details: parsed.error.flatten(),
+      }
+    }, 400)
   }
   const { messages, stream, max_tokens, temperature, tools, tool_choice } = parsed.data
   const maxOutputTokens = max_tokens ?? 16384
@@ -244,8 +251,11 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
     const message = `Insufficient credits. Your current balance is $${remainingVal.toFixed(2)}. Please purchase additional credits to continue.`
 
     const errorBody = {
-      error: "insufficient_credits",
-      message,
+      error: {
+        message,
+        type: "insufficient_credits",
+        code: "insufficient_credits",
+      }
     }
 
     if (stream) {
@@ -444,21 +454,27 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       if (err instanceof ContextWindowExceededError) {
         bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `context_window_exceeded: required=${err.requiredTokens}, largest=${err.largestAvailable}`, requestId: reqId }))
         return c.json({
-          error: "context_window_exceeded",
-          message: err.message,
-          required_tokens: err.requiredTokens,
-          largest_context_window: err.largestAvailable,
-          tier: err.tier,
+          error: {
+            message: err.message,
+            type: "context_window_exceeded",
+            code: "context_window_exceeded",
+            required_tokens: err.requiredTokens,
+            largest_context_window: err.largestAvailable,
+            tier: err.tier,
+          }
         }, 413)
       }
       if (err instanceof UnsupportedCapabilityError) {
         const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
         bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}`, requestId: reqId }))
         return c.json({
-          error: errCode,
-          message: err.message,
-          missing_capabilities: err.missingCapabilities,
-          tier: err.tier,
+          error: {
+            message: err.message,
+            type: errCode.toLowerCase(),
+            code: errCode,
+            missing_capabilities: err.missingCapabilities,
+            tier: err.tier,
+          }
         }, 400)
       }
       throw err
@@ -473,10 +489,13 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
                               classification.kind === "context_length_exceeded" ? "Your request is too long for this model." :
                               "Your request was rejected by the AI provider. Please check your prompt and attachments.";
       return c.json({
-        error: "UPSTREAM_REJECTED_REQUEST",
-        message: readableMessage,
-        classification: classification.kind,
-        upstream_status: classification.statusCode ?? null,
+        error: {
+          message: readableMessage,
+          type: "upstream_rejected_request",
+          code: "UPSTREAM_REJECTED_REQUEST",
+          classification: classification.kind,
+          upstream_status: classification.statusCode ?? null,
+        }
       }, status as 400)
     }
 
@@ -485,13 +504,18 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
     const hint = lastClassification
       ? hintForClassification(lastClassification)
       : "No AI providers responded successfully."
+    const errorType = tried.size === 0 ? "NO_PROVIDERS_CONFIGURED" : "ALL_PROVIDERS_FAILED"
+    const message = tried.size === 0 ? "No AI providers configured — add one in the admin dashboard" : "All AI providers are currently unavailable. Please try again later."
     return c.json({
-      error: tried.size === 0 ? "NO_PROVIDERS_CONFIGURED" : "ALL_PROVIDERS_FAILED",
-      message: tried.size === 0 ? "No AI providers configured — add one in the admin dashboard" : "All AI providers are currently unavailable. Please try again later.",
-      hint,
-      last_failure: lastClassification
-        ? { kind: lastClassification.kind, action: lastClassification.action, statusCode: lastClassification.statusCode ?? null }
-        : null,
+      error: {
+        message,
+        type: errorType.toLowerCase(),
+        code: errorType,
+        hint,
+        last_failure: lastClassification
+          ? { kind: lastClassification.kind, action: lastClassification.action, statusCode: lastClassification.statusCode ?? null }
+          : null,
+      }
     }, tried.size === 0 ? 503 : 502)
   }
 
@@ -630,11 +654,14 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
         if (err instanceof ContextWindowExceededError) {
           bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `context_window_exceeded: required=${err.requiredTokens}, largest=${err.largestAvailable}` }))
           const body = `data: ${JSON.stringify({
-            error: "context_window_exceeded",
-            message: err.message,
-            required_tokens: err.requiredTokens,
-            largest_context_window: err.largestAvailable,
-            tier: err.tier,
+            error: {
+              message: err.message,
+              type: "context_window_exceeded",
+              code: "context_window_exceeded",
+              required_tokens: err.requiredTokens,
+              largest_context_window: err.largestAvailable,
+              tier: err.tier,
+            }
           })}\n\ndata: [DONE]\n\n`
           controller.enqueue(encoder.encode(body))
           controller.close()
@@ -644,10 +671,13 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
           bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}` }))
           const body = `data: ${JSON.stringify({
-            error: errCode,
-            message: err.message,
-            missing_capabilities: err.missingCapabilities,
-            tier: err.tier,
+            error: {
+              message: err.message,
+              type: errCode.toLowerCase(),
+              code: errCode,
+              missing_capabilities: err.missingCapabilities,
+              tier: err.tier,
+            }
           })}\n\ndata: [DONE]\n\n`
           controller.enqueue(encoder.encode(body))
           controller.close()
@@ -664,10 +694,13 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
                                 classification.kind === "context_length_exceeded" ? "Your request is too long for this model." :
                                 "Your request was rejected by the AI provider. Please check your prompt and attachments.";
         const sseBody = `data: ${JSON.stringify({
-          error: "UPSTREAM_REJECTED_REQUEST",
-          message: readableMessage,
-          classification: classification.kind,
-          upstream_status: classification.statusCode ?? null,
+          error: {
+            message: readableMessage,
+            type: "upstream_rejected_request",
+            code: "UPSTREAM_REJECTED_REQUEST",
+            classification: classification.kind,
+            upstream_status: classification.statusCode ?? null,
+          }
         })}\n\ndata: [DONE]\n\n`
         controller.enqueue(encoder.encode(sseBody))
         controller.close()
@@ -680,12 +713,15 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       const lastClassification = lastErr ? classifyProviderError(lastErr) : null
       const hint = lastClassification ? hintForClassification(lastClassification) : "No AI providers responded successfully."
       const sseBody = `data: ${JSON.stringify({
-        error: errorType,
-        message: message,
-        hint,
-        last_failure: lastClassification
-          ? { kind: lastClassification.kind, action: lastClassification.action, statusCode: lastClassification.statusCode ?? null }
-          : null,
+        error: {
+          message: message,
+          type: errorType.toLowerCase(),
+          code: errorType,
+          hint,
+          last_failure: lastClassification
+            ? { kind: lastClassification.kind, action: lastClassification.action, statusCode: lastClassification.statusCode ?? null }
+            : null,
+        }
       })}\n\ndata: [DONE]\n\n`
       controller.enqueue(encoder.encode(sseBody))
       controller.close()

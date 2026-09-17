@@ -128,13 +128,13 @@ export const env = {
   /** Streaming connect timeout (ms). TCP+TLS handshake budget before the
    * first byte. Default: 30 000 ms (30 s). */
   get UPSTREAM_CONNECT_TIMEOUT_MS() {
-    return intEnv("UPSTREAM_CONNECT_TIMEOUT_MS", 30_000)
+    return intEnv("UPSTREAM_CONNECT_TIMEOUT_MS", 120_000)
   },
   /** Streaming first-token timeout (ms). Time from request start to the
-   * first valid chunk (text, reasoning, or tool call). Default: 120 000 ms
-   * (2 min). */
+   * first valid chunk (text, reasoning, or tool call). Default: 180 000 ms
+   * (3 min). */
   get UPSTREAM_FIRST_TOKEN_TIMEOUT_MS() {
-    return intEnv("UPSTREAM_FIRST_TOKEN_TIMEOUT_MS", 120_000)
+    return intEnv("UPSTREAM_FIRST_TOKEN_TIMEOUT_MS", 180_000)
   },
   /** Streaming idle timeout (ms). Gap between any two valid chunks; resets
    * on every chunk. Default: 120 000 ms (2 min). */
