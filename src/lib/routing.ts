@@ -194,12 +194,54 @@ export interface RouteRequirements {
   requiresJsonMode?: boolean
 }
 
+export async function findCandidateByModel(modelName: string): Promise<Candidate | null> {
+  const clean = modelName.trim().toLowerCase().replace(/^zen\//, "")
+  const now = Date.now()
+  const rows = await withDbResilience(() => sql<Candidate[]>`
+    SELECT
+      m.id AS model_row_id, p.id AS provider_id, p.name AS provider_name,
+      p.base_url, p.api_key, m.model_id,
+      m.input_price_per_1m, m.output_price_per_1m,
+      m.input_cache_read_price_per_1m, m.input_cache_write_price_per_1m, m.request_price_flat,
+      m.context_window,
+      m.supports_tools, m.supports_vision, m.supports_json_mode,
+      p.provider_type,
+      1::float8 AS weight,
+      p.healthy, p.health_state, p.last_failure_at, p.cooldown_until
+    FROM models m
+    JOIN providers p ON p.id = m.provider_id
+    WHERE m.enabled = true AND p.enabled = true
+      AND (
+        lower(m.model_id) = ${clean}
+        OR lower(concat(p.name, '/', m.model_id)) = ${clean}
+        OR lower(coalesce(m.label, '')) = ${clean}
+      )
+    ORDER BY p.healthy DESC, m.created_at ASC
+    LIMIT 1
+  `) as any
+  const available = rows.filter((r: any) => isCandidateAvailable(r, now))
+  return available[0] ?? rows[0] ?? null
+}
+
 export async function pickRoute(
   startTier: ComplexityTier,
   maxTier: ComplexityTier = "complex",
   excludeModelRowIds: Set<string> = new Set(),
   requirements: RouteRequirements = {},
+  requestedModel?: string,
 ): Promise<RouteTarget | null> {
+  if (requestedModel) {
+    const norm = requestedModel.trim().toLowerCase()
+    if (norm && norm !== "auto" && norm !== "zen/auto" && norm !== "default") {
+      const explicit = await findCandidateByModel(requestedModel)
+      if (explicit && !excludeModelRowIds.has(explicit.model_row_id)) {
+        const largestSink = { value: null }
+        if (candidateFitsContext(explicit, requirements.requiredTokens, largestSink)) {
+          return toTarget(explicit)
+        }
+      }
+    }
+  }
   const startIdx = TIER_ORDER.indexOf(startTier)
   const maxIdx = Math.min(TIER_ORDER.indexOf(maxTier), TIER_ORDER.length - 1)
 

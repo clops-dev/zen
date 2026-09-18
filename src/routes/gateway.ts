@@ -5,10 +5,9 @@ import { requireApiKey } from "../middleware/api-key"
 import { rateLimit } from "../middleware/rate-limit"
 import { classifyComplexity } from "../lib/complexity"
 import { pickRoute, reportRouteOutcome, type RouteTarget, ContextWindowExceededError, UnsupportedCapabilityError } from "../lib/routing"
-import { callNonStreaming, callStreaming, classifyProviderError } from "../lib/ai-call"
+import { callNonStreaming, callStreaming, classifyProviderError, type StreamStartResult } from "../lib/ai-call"
 import { UpstreamTimeoutError } from "../lib/ai-call"
 import { checkQuota, recordUsage } from "../lib/quota"
-import { checkCreditQuota } from "../lib/quota"
 import { deductCredits, usdToDt, InsufficientCreditsError } from "../lib/credits"
 import { hashPrompt, getCached, setCached } from "../lib/cache"
 import { calcCost } from "../lib/pricing"
@@ -355,7 +354,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   if (!stream) {
     try {
       for (let attempt = 0; attempt < MAX_FALLBACK_ATTEMPTS; attempt++) {
-        const target = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements)
+        const target = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements, parsed.data.model)
         if (!target) break
         tried.add(target.modelRowId)
 
@@ -375,22 +374,25 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
 
           bg(reportRouteOutcome(target.providerId, true))
           bg(recordUsage(user.id, result.inputTokens, result.outputTokens, cost))
-          const requestRowId = reqId
-          bg(recordRequest({
-            userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
-            inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
-            latencyMs, status: "success",
-          }))
-          // Deduct from credit balance if cost > 0.
-          if (cost > 0) {
-            bg(deductCredits(user.id, usdToDt(cost), reqId).catch((err) => {
-              if (err instanceof InsufficientCreditsError) {
-                console.warn(`[gateway] credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
-              } else {
-                console.error("[gateway] credit deduction error:", err)
+          bg((async () => {
+            await recordRequest({
+              userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
+              inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
+              latencyMs, status: "success", requestId: reqId,
+            })
+            // Deduct from credit balance if cost > 0.
+            if (cost > 0) {
+              try {
+                await deductCredits(user.id, usdToDt(cost), reqId)
+              } catch (err) {
+                if (err instanceof InsufficientCreditsError) {
+                  console.warn(`[gateway] credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
+                } else {
+                  console.error("[gateway] credit deduction error:", err)
+                }
               }
-            }))
-          }
+            }
+          })())
           bg(setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens))
 
           console.log(`[gateway] non-stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} latencyMs=${latencyMs} tokens=${result.inputTokens}+${result.outputTokens} status=success`)
@@ -521,13 +523,32 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
 
   // ---- streaming: peek each candidate for real output before committing to the client ----
   const encoder = new TextEncoder()
+  let keepaliveTimer: ReturnType<typeof setInterval> | null = null
+  const stopKeepalive = () => {
+    if (keepaliveTimer !== null) {
+      clearInterval(keepaliveTimer)
+      keepaliveTimer = null
+    }
+  }
+
   const clientStream = new ReadableStream({
     async start(controller) {
       controller.enqueue(encoder.encode(": gateway connected, processing prompt...\n\n"))
 
+      const startKeepalive = () => {
+        stopKeepalive()
+        keepaliveTimer = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(": keepalive\n\n"))
+          } catch {
+            stopKeepalive()
+          }
+        }, 2500)
+      }
+
       try {
         for (let attempt = 0; attempt < MAX_FALLBACK_ATTEMPTS; attempt++) {
-          const target: RouteTarget | null = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements)
+          const target: RouteTarget | null = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements, parsed.data.model)
           if (!target) break
           tried.add(target.modelRowId)
 
@@ -538,7 +559,13 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           const { response, started: streamStarted, done } = callStreaming(
             target, messages as any, maxOutputTokens, temperature, target.label, tools, tool_choice,
           )
-          const startResult = await streamStarted
+          startKeepalive()
+          let startResult: StreamStartResult
+          try {
+            startResult = await streamStarted
+          } finally {
+            stopKeepalive()
+          }
 
           if (!startResult.ok) {
             const classification = classifyProviderError(startResult.error)
@@ -725,6 +752,9 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       })}\n\ndata: [DONE]\n\n`
       controller.enqueue(encoder.encode(sseBody))
       controller.close()
+    },
+    cancel() {
+      stopKeepalive()
     }
   })
 

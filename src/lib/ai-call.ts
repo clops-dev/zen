@@ -90,7 +90,10 @@ export function chatCompletionsBodyToResponses(body: Record<string, unknown>): R
   delete out.messages
 
   if (typeof out.max_tokens === "number" && out.max_output_tokens === undefined) {
-    out.max_output_tokens = out.max_tokens
+    out.max_output_tokens = Math.max(16, out.max_tokens)
+  }
+  if (typeof out.max_output_tokens === "number" && out.max_output_tokens < 16) {
+    out.max_output_tokens = 16
   }
   delete out.max_tokens
 
@@ -711,16 +714,33 @@ function rewriteInitBodyToResponses(init?: RequestInit): RequestInit {
   return newInit
 }
 
+function rewriteInitBodyForChatCompletions(init?: RequestInit): RequestInit {
+  const newInit: RequestInit = { ...(init ?? {}) }
+  if (newInit.body && typeof newInit.body === "string") {
+    try {
+      const body = JSON.parse(newInit.body)
+      if (body && typeof body === "object") {
+        if (typeof body.max_tokens === "number" && body.max_completion_tokens === undefined) {
+          body.max_completion_tokens = body.max_tokens
+          delete body.max_tokens
+        }
+        newInit.body = JSON.stringify(body)
+      }
+    } catch {
+      // leave body unchanged
+    }
+  }
+  return newInit
+}
+
 function makeToolCallNormalizingFetch(customFetch: (input: any, init?: any) => Promise<Response> = globalThis.fetch) {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     let url = typeof input === "string" ? input : input instanceof Request ? input.url : String((input as any)?.url ?? "")
 
-    // Azure Foundry / OpenAI v1: prefer POST /responses. Models like
-    // gpt-5.1-codex-mini reject Chat Completions entirely. Translate the
-    // body (messages→input, max_tokens→max_output_tokens) before the first
-    // attempt so we never send a Chat Completions payload that Azure 400s on.
-    // If /responses is unavailable for this model, fall back to the original
-    // /chat/completions request so classic chat models on the same host still work.
+    // Azure Foundry / OpenAI v1:
+    // Models like gpt-5.1 and gpt-4.1-mini natively support /chat/completions with
+    // max_completion_tokens (and reject max_tokens with 400).
+    // Codex-specific preview models require POST /responses.
     if (isAzureV1ChatCompletionsUrl(url)) {
       const responsesUrl = url.replace(/\/chat\/completions\/?(?=\?|$)/, "/responses")
       const responsesInit = rewriteInitBodyToResponses(init)
@@ -746,9 +766,17 @@ function makeToolCallNormalizingFetch(customFetch: (input: any, init?: any) => P
       }
 
       // Fall back to native Chat Completions if Responses failed for any reason.
-      // Many Azure deployments (e.g. standard gpt-4o, gpt-4.1-mini) serve /chat/completions natively.
-      const chatRes = await customFetch(input, init)
-      if (chatRes.ok) {
+      // Many Azure deployments serve /chat/completions natively.
+      const chatInit = rewriteInitBodyForChatCompletions(init)
+      const chatRes = await customFetch(input, chatInit)
+      if (chatRes.ok && chatRes.body) {
+        const contentType = chatRes.headers.get("content-type") ?? ""
+        if (contentType.includes("text/event-stream")) {
+          return normalizeSseToolCallResponse(chatRes)
+        }
+        if (contentType.includes("application/json")) {
+          return normalizeJsonToolCallResponse(chatRes)
+        }
         return chatRes
       }
       return chatRes
