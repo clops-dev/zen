@@ -29,6 +29,19 @@ export const MIN_PACKAGE_DT = 5
 /** Packages must be multiples of this many DT. */
 export const PACKAGE_STEP_DT = 5
 
+/**
+ * Welcome bonus granted to every new user on signup.
+ * Real value: $2 USD of AI usage (6 DT at 3 DT/$).
+ * Displayed value in the UI: $5 (promotional — see WELCOME_DISPLAY_USD).
+ */
+export const WELCOME_CREDITS_DT = 2 * DT_PER_USD // 6 DT = $2 real value
+
+/**
+ * The promotional dollar figure shown to users for their welcome bonus.
+ * This is purely a display value — the actual credit granted is WELCOME_CREDITS_DT.
+ */
+export const WELCOME_DISPLAY_USD = 5
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -48,6 +61,8 @@ export interface CreditBalance {
   balance_dt: number
   balance_usd_value: number
   updated_at: string
+  /** Promotional display-only figure shown to users as their welcome bonus value. */
+  welcome_display_usd: number
 }
 
 /**
@@ -61,13 +76,14 @@ export async function getBalance(userId: string): Promise<CreditBalance> {
     WHERE user_id = ${userId}
   `)
   if (rows.length === 0) {
-    return { balance_dt: 0, balance_usd_value: 0, updated_at: new Date().toISOString() }
+    return { balance_dt: 0, balance_usd_value: 0, updated_at: new Date().toISOString(), welcome_display_usd: WELCOME_DISPLAY_USD }
   }
   const balance_dt = Number(rows[0].balance_dt)
   return {
     balance_dt,
     balance_usd_value: Number((balance_dt / DT_PER_USD).toFixed(4)),
     updated_at: rows[0].updated_at,
+    welcome_display_usd: WELCOME_DISPLAY_USD,
   }
 }
 
@@ -433,6 +449,8 @@ export interface UserBillingSummary {
   input_tokens: number
   output_tokens: number
   total_tokens: number
+  /** Promotional display-only welcome bonus figure shown in the UI ($5). */
+  welcome_display_usd: number
 }
 
 export async function getUserBillingSummary(userId: string): Promise<UserBillingSummary> {
@@ -477,6 +495,7 @@ export async function getUserBillingSummary(userId: string): Promise<UserBilling
     input_tokens,
     output_tokens,
     total_tokens,
+    welcome_display_usd: WELCOME_DISPLAY_USD,
   }
 }
 

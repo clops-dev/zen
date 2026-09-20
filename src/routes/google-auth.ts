@@ -23,6 +23,7 @@ import { sql } from "../lib/db"
 import { issueSession, SESSION_COOKIE, SESSION_COOKIE_OPTIONS } from "../lib/session"
 import { env } from "../lib/env"
 import { approveDeviceCode } from "./device-auth"
+import { addCredits, WELCOME_CREDITS_DT, WELCOME_DISPLAY_USD } from "../lib/credits"
 
 export const googleAuth = new Hono()
 
@@ -209,6 +210,10 @@ googleAuth.get("/google/callback", async (c) => {
           VALUES (${newUser.id}, 0)
           ON CONFLICT (user_id) DO NOTHING
         `
+        // Grant welcome bonus — real $2 value (WELCOME_CREDITS_DT DT), displayed as $5 in the UI.
+        await addCredits(newUser.id, WELCOME_CREDITS_DT, "admin_grant", "completed", {
+          adminNote: `Welcome bonus: ${WELCOME_CREDITS_DT} DT granted on Google signup (displays as $${WELCOME_DISPLAY_USD} to user)`,
+        })
         userId = newUser.id
       }
     } else {
