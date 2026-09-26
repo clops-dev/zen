@@ -90,6 +90,10 @@ export type Model = {
   supports_reasoning: boolean
   supports_structured_outputs?: boolean
   supports_embeddings: boolean
+  supports_fim?: boolean
+  quality_score?: number | null
+  tokenizer?: string | null
+  max_output_tokens?: number | null
   input_modalities?: string[]
   output_modalities?: string[]
   is_moderated?: boolean

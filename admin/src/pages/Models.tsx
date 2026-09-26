@@ -26,6 +26,7 @@ const CAP_KEYS = [
   ["supports_reasoning", "Reasoning"],
   ["supports_embeddings", "Embeddings"],
   ["supports_structured_outputs", "Structured Outputs"],
+  ["supports_fim", "FIM"],
 ] as const
 
 export function ModelsPage() {
@@ -266,6 +267,9 @@ function ModelDialog({
     initial?.request_price_flat != null ? String(initial.request_price_flat) : "0",
   )
   const [ctx, setCtx] = useState(String(initial?.context_window ?? ""))
+  const [qualityScore, setQualityScore] = useState(initial?.quality_score != null ? String(initial.quality_score) : "")
+  const [tokenizer, setTokenizer] = useState(initial?.tokenizer ?? "approx")
+  const [maxOutputTokens, setMaxOutputTokens] = useState(initial?.max_output_tokens != null ? String(initial.max_output_tokens) : "")
   const [caps, setCaps] = useState<Record<string, boolean>>(() => {
     const m = initial as any
     return {
@@ -276,6 +280,7 @@ function ModelDialog({
       supports_reasoning: m?.supports_reasoning ?? false,
       supports_embeddings: m?.supports_embeddings ?? false,
       supports_structured_outputs: m?.supports_structured_outputs ?? false,
+      supports_fim: m?.supports_fim ?? false,
     }
   })
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
@@ -300,6 +305,9 @@ function ModelDialog({
       setInCacheWritePrice(initial?.input_cache_write_price_per_1m != null ? String(initial.input_cache_write_price_per_1m) : "")
       setFlatRequestPrice(initial?.request_price_flat != null ? String(initial.request_price_flat) : "0")
       setCtx(String(initial?.context_window ?? ""))
+      setQualityScore(initial?.quality_score != null ? String(initial.quality_score) : "")
+      setTokenizer(initial?.tokenizer ?? "approx")
+      setMaxOutputTokens(initial?.max_output_tokens != null ? String(initial.max_output_tokens) : "")
       const m = initial as any
       setCaps({
         supports_tools: m?.supports_tools ?? false,
@@ -309,6 +317,7 @@ function ModelDialog({
         supports_reasoning: m?.supports_reasoning ?? false,
         supports_embeddings: m?.supports_embeddings ?? false,
         supports_structured_outputs: m?.supports_structured_outputs ?? false,
+        supports_fim: m?.supports_fim ?? false,
       })
       setEnabled(initial?.enabled ?? true)
       setOpenrouterModelId(initial?.openrouter_model_id ?? "")
@@ -376,6 +385,9 @@ function ModelDialog({
       input_cache_write_price_per_1m: inCacheWritePrice !== "" ? Number(inCacheWritePrice) : null,
       request_price_flat: flatRequestPrice !== "" ? Number(flatRequestPrice) : 0,
       context_window: ctx ? Number(ctx) : null,
+      quality_score: qualityScore !== "" ? Number(qualityScore) : null,
+      tokenizer: tokenizer || "approx",
+      max_output_tokens: maxOutputTokens !== "" ? Number(maxOutputTokens) : null,
       openrouter_model_id: openrouterModelId || null,
       metadata_synced_at: metadataSyncedAt || null,
       ...caps,
@@ -523,6 +535,40 @@ function ModelDialog({
             value={flatRequestPrice}
             onChange={(e) => setFlatRequestPrice(e.target.value)}
             placeholder="0"
+          />
+        </Field>
+        <Field label="Quality score (0-100)">
+          <input
+            className="input w-full"
+            type="number"
+            min="0"
+            max="100"
+            value={qualityScore}
+            onChange={(e) => setQualityScore(e.target.value)}
+            placeholder="e.g. 90"
+          />
+        </Field>
+        <Field label="Tokenizer">
+          <select
+            className="input w-full"
+            value={tokenizer}
+            onChange={(e) => setTokenizer(e.target.value)}
+          >
+            <option value="approx">Approx (generic 1.25x)</option>
+            <option value="cl100k">cl100k_base (OpenAI GPT-3.5/4)</option>
+            <option value="o200k">o200k_base (OpenAI GPT-4o)</option>
+            <option value="anthropic">Anthropic Claude (1.15x)</option>
+            <option value="gemini">Google Gemini (1.15x)</option>
+          </select>
+        </Field>
+        <Field label="Max output tokens">
+          <input
+            className="input w-full"
+            type="number"
+            min="1"
+            value={maxOutputTokens}
+            onChange={(e) => setMaxOutputTokens(e.target.value)}
+            placeholder="optional"
           />
         </Field>
         <Field label="Enabled" className="flex-row items-center">

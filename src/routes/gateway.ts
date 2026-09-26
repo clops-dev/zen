@@ -5,7 +5,15 @@ import { requireApiKey } from "../middleware/api-key"
 import { rateLimit } from "../middleware/rate-limit"
 import { classifyComplexity, isAgentRequest } from "../lib/complexity"
 import { env } from "../lib/env"
-import { pickRoute, reportRouteOutcome, type RouteTarget, ContextWindowExceededError, UnsupportedCapabilityError } from "../lib/routing"
+import {
+  pickRoute,
+  reportRouteOutcome,
+  type RouteTarget,
+  ContextWindowExceededError,
+  UnsupportedCapabilityError,
+  ExplicitModelCapabilityError,
+} from "../lib/routing"
+import { deriveConversationKey, getAffinityStore } from "../lib/affinity"
 import { callNonStreaming, callStreaming, classifyProviderError, type StreamStartResult } from "../lib/ai-call"
 import { UpstreamTimeoutError } from "../lib/ai-call"
 import { checkQuota, recordUsage } from "../lib/quota"
@@ -25,7 +33,7 @@ const messageSchema = z.object({
 }).passthrough()
 
 const chatCompletionsSchema = z.object({
-  model: z.string().optional(), // accepted for OpenAI-client compatibility, not used for routing — routing is complexity-based
+  model: z.string().optional(),
   messages: z.array(messageSchema).min(1),
   stream: z.boolean().default(false),
   max_tokens: z.number().int().positive().optional(),
@@ -34,10 +42,8 @@ const chatCompletionsSchema = z.object({
   tool_choice: z.any().optional(),
 })
 
-// How many different models/providers to try, per request, before giving up entirely.
-// When multiple OpenRouter API keys or candidates are registered, the gateway
-// will attempt each one sequentially upon rate-limits (429) or failures.
-const MAX_FALLBACK_ATTEMPTS = 10
+// P3.10: Configurable fallback attempts per request before failing (default: 4)
+const MAX_FALLBACK_ATTEMPTS = env.MAX_FALLBACK_ATTEMPTS
 
 function bg(p: Promise<unknown>) {
   p.catch((err) => console.error("[gateway] background task error:", err))
@@ -256,20 +262,45 @@ function logStructuredRequest(fields: {
 }
 
 gateway.get("/models", requireApiKey(), async (c) => {
-  const rows = await withDbResilience(() => sql`
-    SELECT p.name AS provider, m.model_id, m.label, m.context_window
-    FROM models m JOIN providers p ON p.id = m.provider_id
-    WHERE m.enabled = true AND p.enabled = true
-    ORDER BY p.name, m.model_id
-  `)
+  const [rows, aliasRows] = await Promise.all([
+    withDbResilience(() => sql`
+      SELECT p.name AS provider, m.model_id, m.label, m.context_window
+      FROM models m JOIN providers p ON p.id = m.provider_id
+      WHERE m.enabled = true AND p.enabled = true
+      ORDER BY p.name, m.model_id
+    `).catch(() => []),
+    withDbResilience(() => sql`
+      SELECT alias, target_tier, target_model_id, description
+      FROM model_aliases
+      ORDER BY alias
+    `).catch(() => []),
+  ])
+
+  const fallbackAliases = [
+    { alias: "zen/auto", description: "Dynamic tier routing based on prompt intent" },
+    { alias: "zen/fast", description: "Fast, lightweight tier for quick completions" },
+    { alias: "zen/smart", description: "High-capability tier for complex reasoning and tools" },
+    { alias: "zen/reasoning", description: "Reasoning and deep architecture tasks" },
+  ]
+  const aliasesToUse = aliasRows && aliasRows.length > 0 ? aliasRows : fallbackAliases
+  const aliasEntries = aliasesToUse.map((a: any) => ({
+    id: a.alias,
+    object: "model",
+    owned_by: "zen",
+    description: a.description,
+  }))
+
   return c.json({
     object: "list",
-    data: rows.map((r: any) => ({
-      id: `${r.provider}/${r.model_id}`,
-      object: "model",
-      owned_by: r.provider,
-      context_window: r.context_window,
-    })),
+    data: [
+      ...aliasEntries,
+      ...rows.map((r: any) => ({
+        id: `${r.provider}/${r.model_id}`,
+        object: "model",
+        owned_by: r.provider,
+        context_window: r.context_window,
+      })),
+    ],
   })
 })
 
@@ -334,7 +365,9 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
 
   // ---- cache check ----
   const cacheKey = hashPrompt(messages as any, complexity.tier)
-  const cached = await getCached(cacheKey).catch((err) => {
+  // Tool/agent requests are stateful, so a cached response can corrupt the
+  // loop and bypass the conversation affinity decision.
+  const cached = isAgent ? null : await getCached(cacheKey).catch((err) => {
     console.error("[gateway] cache read failed:", err)
     return null
   })
@@ -378,6 +411,23 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   let lastErr: unknown = null
   let breakLoopErr: unknown = null
 
+  const affinityStore = getAffinityStore()
+  const sessionId = c.req.header("x-session-id") ?? c.req.header("x-zen-conversation-id") ?? c.req.header("x-cursor-session-id") ?? null
+  const firstUserMsg = (messages as any[]).find((m: any) => m.role === "user")?.content
+  const firstUserText = typeof firstUserMsg === "string" ? firstUserMsg : (Array.isArray(firstUserMsg) ? JSON.stringify(firstUserMsg) : null)
+  const systemMsg = (messages as any[]).find((m: any) => m.role === "system")?.content
+  const systemText = typeof systemMsg === "string" ? systemMsg : (Array.isArray(systemMsg) ? JSON.stringify(systemMsg) : null)
+
+  const convKey = deriveConversationKey({
+    sessionId,
+    apiKeyId: user.id,
+    systemPrompt: systemText,
+    firstUserMessage: firstUserText,
+  })
+  const activeAffinity = convKey ? await affinityStore.get(convKey) : null
+  const initialPinnedRowId = activeAffinity?.modelRowId
+  const requestDeadlineMs = env.REQUEST_DEADLINE_MS
+
   // Pre-compute input tokens once. Used by pickRoute to filter out models
   // whose context window can't fit this request — runs on every pickRoute
   // call (including the catch-all "any model" set) so that a tier with
@@ -418,13 +468,27 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   if (!stream) {
     try {
       for (let attempt = 0; attempt < MAX_FALLBACK_ATTEMPTS; attempt++) {
-        const target = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements, parsed.data.model)
+        const elapsed = Date.now() - started
+        const remainingMs = requestDeadlineMs - elapsed
+        if (remainingMs <= 0) {
+          failoverChain.push({ kind: "deadline_exceeded" })
+          break
+        }
+
+        const target = await pickRoute(
+          complexity.tier,
+          quota.maxComplexityTier,
+          tried,
+          requirements,
+          parsed.data.model,
+          initialPinnedRowId,
+        )
         if (!target) break
         tried.add(target.modelRowId)
         const gatewayOverheadMs = Math.round(performance.now() - reqStart)
 
         try {
-          const result = await callNonStreaming(target, messages as any, maxOutputTokens, temperature, tools, tool_choice)
+          const result = await callNonStreaming(target, messages as any, maxOutputTokens, temperature, tools, tool_choice, remainingMs)
           const latencyMs = Date.now() - started
           const cost = calcCost({
             inputPricePer1M: target.inputPricePer1M,
@@ -437,7 +501,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             cachedTokens: (result as any).cachedTokens ?? 0,
           })
 
-          bg(reportRouteOutcome(target.providerId, true))
+          bg(reportRouteOutcome(target.providerId, true, target.modelRowId))
           bg(recordUsage(user.id, result.inputTokens, result.outputTokens, cost))
           bg((async () => {
             await recordRequest({
@@ -478,6 +542,25 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             stream: false,
           })
 
+          if (convKey) {
+            await affinityStore.set(convKey, {
+              modelRowId: target.modelRowId,
+              providerId: target.providerId,
+              modelLabel: target.label,
+              pinnedAt: Date.now(),
+            })
+          }
+          if (activeAffinity && activeAffinity.modelRowId !== target.modelRowId) {
+            console.warn(`[affinity] conversation ${convKey} switched from model ${activeAffinity.modelLabel} (${activeAffinity.modelRowId}) to ${target.label} (${target.modelRowId})`)
+            c.header("x-zen-model-switched", "true")
+          }
+          const reqModel = parsed.data.model
+          if (reqModel && !reqModel.startsWith("zen/") && target.label !== reqModel && `${target.providerName}/${target.modelId}` !== reqModel && target.modelId !== reqModel) {
+            c.header("x-zen-model-substituted", "true")
+            c.header("x-zen-model-requested", reqModel)
+          }
+          c.header("x-zen-model", target.label)
+
           console.log(`[gateway] non-stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} latencyMs=${latencyMs} tokens=${result.inputTokens}+${result.outputTokens} status=success`)
           return c.json({
             id: `chatcmpl-${Date.now()}`,
@@ -492,26 +575,8 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             usage: { prompt_tokens: result.inputTokens, completion_tokens: result.outputTokens },
           })
         } catch (err) {
-          // Context-window and unsupported-capability errors are not retryable
-          // across the rest of the chain (pickRoute already filtered to fitting models).
-          // Let it bubble out of the whole loop so we can 4xx the client.
-          if (err instanceof ContextWindowExceededError || err instanceof UnsupportedCapabilityError) throw err
+          if (err instanceof ContextWindowExceededError || err instanceof UnsupportedCapabilityError || err instanceof ExplicitModelCapabilityError) throw err
 
-          // Classify the upstream error into one of three loop-control
-          // actions:
-          //   continue        — try the next model in the chain (5xx, 429,
-          //                     network, timeout, unknown).
-          //   skip_candidate  — this specific (provider, model) is dead
-          //                     (401, 403, 404 — bad key, no access,
-          //                     unknown model id on that provider) but the
-          //                     request itself is fine, so the next model
-          //                     can still serve it. We continue the loop
-          //                     and only stop if no candidate works.
-          //   break_loop      — the request itself is invalid (400, 422,
-          //                     unsupported param/tool). Trying any other
-          //                     model would fail identically. Bail out
-          //                     immediately and return the error to the
-          //                     client.
           const classification = classifyProviderError(err)
           const latencyMs = Date.now() - started
           const rejectReason = (err as UpstreamTimeoutError)?.rejectReason
@@ -526,14 +591,12 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           )
           lastErr = err
           failoverChain.push({ kind: classification.kind, model: target.label })
-          bg(reportRouteOutcome(target.providerId, { success: false, error: err }))
+          bg(reportRouteOutcome(target.providerId, { success: false, error: err }, target.modelRowId))
           bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(err), requestId: reqId }))
           if (classification.action === "break_loop") {
             breakLoopErr = err
             break
           }
-          // continue or skip_candidate: loop continues — pickRoute will
-          // exclude this model_row_id next iteration either way
         }
       }
     } catch (err) {
@@ -542,13 +605,26 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
         return c.json({
           error: {
             message: err.message,
-            type: "context_window_exceeded",
-            code: "context_window_exceeded",
+            type: "context_length_exceeded",
+            code: "context_length_exceeded",
             required_tokens: err.requiredTokens,
             largest_context_window: err.largestAvailable,
+            suggested_action: "compact_context_or_summarize",
             tier: err.tier,
           }
         }, 413)
+      }
+      if (err instanceof ExplicitModelCapabilityError) {
+        bg(recordRequest({ userId: user.id, ip, modelLabel: err.requestedModel, status: "rejected", rejectReason: `unsupported_capability: ${err.missingCapabilities.join(",")}`, requestId: reqId }))
+        return c.json({
+          error: {
+            message: err.message,
+            type: "unsupported_capability",
+            code: "unsupported_capability",
+            missing_capabilities: err.missingCapabilities,
+            requested_model: err.requestedModel,
+          }
+        }, 400)
       }
       if (err instanceof UnsupportedCapabilityError) {
         const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
@@ -564,6 +640,19 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
         }, 400)
       }
       throw err
+    }
+
+    const totalElapsed = Date.now() - started
+    if (totalElapsed >= requestDeadlineMs || failoverChain.some(f => f.kind === "deadline_exceeded")) {
+      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "gateway_deadline_exceeded", requestId: reqId }))
+      return c.json({
+        error: {
+          message: "Gateway deadline exceeded across fallback attempts",
+          type: "gateway_deadline_exceeded",
+          code: "gateway_deadline_exceeded",
+          failover_chain: failoverChain,
+        }
+      }, 504)
     }
 
     if (breakLoopErr) {
@@ -638,299 +727,327 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   }
 
   // ---- streaming: peek each candidate for real output before committing to the client ----
-  const encoder = new TextEncoder()
-  let keepaliveTimer: ReturnType<typeof setInterval> | null = null
-  const stopKeepalive = () => {
-    if (keepaliveTimer !== null) {
-      clearInterval(keepaliveTimer)
-      keepaliveTimer = null
+  let committedTarget: RouteTarget | null = null
+  let committedStream: ReadableStream | null = null
+  let isSwitchedStream = false
+  let isSubstitutedStream = false
+
+  try {
+    for (let attempt = 0; attempt < MAX_FALLBACK_ATTEMPTS; attempt++) {
+      const elapsed = Date.now() - started
+      const remainingMs = requestDeadlineMs - elapsed
+      if (remainingMs <= 0) {
+        failoverChain.push({ kind: "deadline_exceeded" })
+        break
+      }
+
+      const target: RouteTarget | null = await pickRoute(
+        complexity.tier,
+        quota.maxComplexityTier,
+        tried,
+        requirements,
+        parsed.data.model,
+        initialPinnedRowId,
+      )
+      if (!target) break
+      tried.add(target.modelRowId)
+      const gatewayOverheadMs = Math.round(performance.now() - reqStart)
+
+      const { response, started: streamStarted, done } = callStreaming(
+        target, messages as any, maxOutputTokens, temperature, target.label, tools, tool_choice, remainingMs,
+      )
+      let startResult: StreamStartResult
+      try {
+        startResult = await streamStarted
+      } catch (err) {
+        startResult = { ok: false, error: err }
+      }
+
+      if (!startResult.ok) {
+        const classification = classifyProviderError(startResult.error)
+        const latencyMs = Date.now() - started
+        const rejectReason = (startResult.error as UpstreamTimeoutError)?.rejectReason
+        const extras = rejectionExtras(startResult.error)
+        console.error(
+          `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
+          `latencyMs=${latencyMs} status=${classification.action}:${classification.kind}` +
+          (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
+          (rejectReason ? ` timeout=${rejectReason}` : "") +
+          extras,
+          startResult.error,
+        )
+        if (classification.action === "break_loop" && classification.kind === "bad_request") {
+          logMessageDiagnostics(messages as any[], "incoming_request")
+        }
+        lastErr = startResult.error
+        failoverChain.push({ kind: classification.kind, model: target.label })
+        bg(reportRouteOutcome(target.providerId, { success: false, error: startResult.error }, target.modelRowId))
+        bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(startResult.error), requestId: reqId }))
+        if (classification.action === "break_loop") {
+          breakLoopErr = startResult.error
+          break
+        }
+        continue
+      }
+
+      // Committed — this target actually produced output, stream its response to the client.
+      committedTarget = target
+      committedStream = response.body!
+      const ttftMs = Date.now() - started
+      console.log(`[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} stream=committed firstTokenReceived=true elapsedMs=${ttftMs}`)
+
+      if (convKey) {
+        await affinityStore.set(convKey, {
+          modelRowId: target.modelRowId,
+          providerId: target.providerId,
+          modelLabel: target.label,
+          pinnedAt: Date.now(),
+        })
+      }
+      if (activeAffinity && activeAffinity.modelRowId !== target.modelRowId) {
+        isSwitchedStream = true
+        console.warn(`[affinity] conversation ${convKey} switched from model ${activeAffinity.modelLabel} (${activeAffinity.modelRowId}) to ${target.label} (${target.modelRowId})`)
+      }
+      const reqModel = parsed.data.model
+      if (reqModel && !reqModel.startsWith("zen/") && target.label !== reqModel && `${target.providerName}/${target.modelId}` !== reqModel && target.modelId !== reqModel) {
+        isSubstitutedStream = true
+      }
+
+      bg((async () => {
+        try {
+          const result = await done
+          const latencyMs = Date.now() - started
+          const cost = calcCost({
+            inputPricePer1M: target.inputPricePer1M,
+            outputPricePer1M: target.outputPricePer1M,
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+            inputCacheReadPricePer1M: target.inputCacheReadPricePer1M,
+            inputCacheWritePricePer1M: target.inputCacheWritePricePer1M,
+            requestPriceFlat: target.requestPriceFlat,
+            cachedTokens: (result as any).cachedTokens ?? 0,
+          })
+          await reportRouteOutcome(target.providerId, true, target.modelRowId)
+          await recordUsage(user.id, result.inputTokens, result.outputTokens, cost)
+          await recordRequest({
+            userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
+            inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
+            latencyMs, status: "success", requestId: reqId,
+          })
+          // Deduct from credit balance if cost > 0.
+          if (cost > 0) {
+            try {
+              await deductCredits(user.id, usdToDt(cost), reqId)
+            } catch (err) {
+              if (err instanceof InsufficientCreditsError) {
+                console.warn(`[gateway] stream credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
+              } else {
+                console.error("[gateway] stream credit deduction error:", err)
+              }
+            }
+          }
+          await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
+          logStructuredRequest({
+            requestId: reqId,
+            userId: user.id,
+            tier: complexity.tier,
+            routeDecision: target.label,
+            routeReason: target.label,
+            model: target.label,
+            attemptCount: attempt + 1,
+            ttftMs,
+            totalLatencyMs: latencyMs,
+            overheadMs: gatewayOverheadMs,
+            tokens: { input: result.inputTokens, output: result.outputTokens, cached: (result as any).cachedTokens ?? 0 },
+            costUsd: cost,
+            cancelled: false,
+            failoverChain,
+            status: "success",
+            stream: true,
+          })
+        } catch (err) {
+          const isClientCancel =
+            (err instanceof Error && (
+              err.message.includes("stream cancelled by client") ||
+              err.message.includes("cancelled by client") ||
+              err.name === "AbortError"
+            )) ||
+            (typeof err === "string" && (err.includes("stream cancelled by client") || err.includes("cancelled by client")))
+
+          const classification = classifyProviderError(err)
+          const rejectReason = (err as UpstreamTimeoutError)?.rejectReason
+          console.error(
+            `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
+            `status=${classification.action}:${classification.kind}` +
+            (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
+            (rejectReason ? ` timeout=${rejectReason}` : "") +
+            ` stage=mid_stream`,
+            err,
+          )
+          if (!isClientCancel) {
+            await reportRouteOutcome(target.providerId, { success: false, error: err }, target.modelRowId)
+          }
+          await recordRequest({
+            userId: user.id,
+            ip,
+            modelLabel: target.label,
+            promptHash: cacheKey,
+            status: "failure",
+            rejectReason: isClientCancel ? "client_cancelled" : ("mid_stream_failure: " + failureReason(err)),
+            requestId: reqId,
+          })
+          logStructuredRequest({
+            requestId: reqId,
+            userId: user.id,
+            tier: complexity.tier,
+            routeDecision: target.label,
+            routeReason: target.label,
+            model: target.label,
+            attemptCount: attempt + 1,
+            ttftMs,
+            totalLatencyMs: Date.now() - started,
+            overheadMs: gatewayOverheadMs,
+            tokens: { input: 0, output: 0, cached: 0 },
+            costUsd: 0,
+            cancelled: isClientCancel,
+            failoverChain,
+            status: "failure",
+            errorReason: isClientCancel ? "client_cancelled" : ("mid_stream_failure: " + failureReason(err)),
+            stream: true,
+          })
+        }
+      })())
+
+      break
     }
+  } catch (err) {
+    if (err instanceof ContextWindowExceededError) {
+      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `context_window_exceeded: required=${err.requiredTokens}, largest=${err.largestAvailable}`, requestId: reqId }))
+      return c.json({
+        error: {
+          message: err.message,
+          type: "context_length_exceeded",
+          code: "context_length_exceeded",
+          required_tokens: err.requiredTokens,
+          largest_context_window: err.largestAvailable,
+          suggested_action: "compact_context_or_summarize",
+          tier: err.tier,
+        }
+      }, 413)
+    }
+    if (err instanceof ExplicitModelCapabilityError) {
+      bg(recordRequest({ userId: user.id, ip, modelLabel: err.requestedModel, status: "rejected", rejectReason: `unsupported_capability: ${err.missingCapabilities.join(",")}`, requestId: reqId }))
+      return c.json({
+        error: {
+          message: err.message,
+          type: "unsupported_capability",
+          code: "unsupported_capability",
+          missing_capabilities: err.missingCapabilities,
+          requested_model: err.requestedModel,
+        }
+      }, 400)
+    }
+    if (err instanceof UnsupportedCapabilityError) {
+      const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
+      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}`, requestId: reqId }))
+      return c.json({
+        error: {
+          message: err.message,
+          type: errCode.toLowerCase(),
+          code: errCode,
+          missing_capabilities: err.missingCapabilities,
+          tier: err.tier,
+        }
+      }, 400)
+    }
+    throw err
   }
 
-  const clientStream = new ReadableStream({
-    async start(controller) {
-      controller.enqueue(encoder.encode(": gateway connected, processing prompt...\n\n"))
-
-      const startKeepalive = () => {
-        stopKeepalive()
-        keepaliveTimer = setInterval(() => {
-          try {
-            controller.enqueue(encoder.encode(": keepalive\n\n"))
-          } catch {
-            stopKeepalive()
-          }
-        }, 2500)
-      }
-
-      try {
-        for (let attempt = 0; attempt < MAX_FALLBACK_ATTEMPTS; attempt++) {
-          const target: RouteTarget | null = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements, parsed.data.model)
-          if (!target) break
-          tried.add(target.modelRowId)
-          const gatewayOverheadMs = Math.round(performance.now() - reqStart)
-
-          if (attempt > 0) {
-            controller.enqueue(encoder.encode(`: retrying prompt with ${target.label}...\n\n`))
-          }
-
-          const { response, started: streamStarted, done } = callStreaming(
-            target, messages as any, maxOutputTokens, temperature, target.label, tools, tool_choice,
-          )
-          startKeepalive()
-          let startResult: StreamStartResult
-          try {
-            startResult = await streamStarted
-          } finally {
-            stopKeepalive()
-          }
-
-          if (!startResult.ok) {
-            const classification = classifyProviderError(startResult.error)
-            const latencyMs = Date.now() - started
-            const rejectReason = (startResult.error as UpstreamTimeoutError)?.rejectReason
-            const extras = rejectionExtras(startResult.error)
-            console.error(
-              `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
-              `latencyMs=${latencyMs} status=${classification.action}:${classification.kind}` +
-              (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
-              (rejectReason ? ` timeout=${rejectReason}` : "") +
-              extras,
-              startResult.error,
-            )
-            if (classification.action === "break_loop" && classification.kind === "bad_request") {
-              logMessageDiagnostics(messages as any[], "incoming_request")
-            }
-            lastErr = startResult.error
-            failoverChain.push({ kind: classification.kind, model: target.label })
-            bg(reportRouteOutcome(target.providerId, { success: false, error: startResult.error }))
-            bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(startResult.error), requestId: reqId }))
-            if (classification.action === "break_loop") {
-              breakLoopErr = startResult.error
-              break
-            }
-            continue
-          }
-
-          // Committed — this target actually produced output, stream its response to the client.
-          const ttftMs = Date.now() - started
-          console.log(`[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} stream=committed firstTokenReceived=true elapsedMs=${ttftMs}`)
-          bg((async () => {
-            try {
-              const result = await done
-              const latencyMs = Date.now() - started
-              const cost = calcCost({
-                inputPricePer1M: target.inputPricePer1M,
-                outputPricePer1M: target.outputPricePer1M,
-                inputTokens: result.inputTokens,
-                outputTokens: result.outputTokens,
-                inputCacheReadPricePer1M: target.inputCacheReadPricePer1M,
-                inputCacheWritePricePer1M: target.inputCacheWritePricePer1M,
-                requestPriceFlat: target.requestPriceFlat,
-                cachedTokens: (result as any).cachedTokens ?? 0,
-              })
-              await reportRouteOutcome(target.providerId, true)
-              await recordUsage(user.id, result.inputTokens, result.outputTokens, cost)
-              await recordRequest({
-                userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
-                inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
-                latencyMs, status: "success", requestId: reqId,
-              })
-              // Deduct from credit balance if cost > 0.
-              if (cost > 0) {
-                try {
-                  await deductCredits(user.id, usdToDt(cost), reqId)
-                } catch (err) {
-                  if (err instanceof InsufficientCreditsError) {
-                    console.warn(`[gateway] stream credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
-                  } else {
-                    console.error("[gateway] stream credit deduction error:", err)
-                  }
-                }
-              }
-              await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
-              logStructuredRequest({
-                requestId: reqId,
-                userId: user.id,
-                tier: complexity.tier,
-                routeDecision: target.label,
-                routeReason: target.label,
-                model: target.label,
-                attemptCount: attempt + 1,
-                ttftMs,
-                totalLatencyMs: latencyMs,
-                overheadMs: gatewayOverheadMs,
-                tokens: { input: result.inputTokens, output: result.outputTokens, cached: (result as any).cachedTokens ?? 0 },
-                costUsd: cost,
-                cancelled: false,
-                failoverChain,
-                status: "success",
-                stream: true,
-              })
-            } catch (err) {
-              const isClientCancel =
-                (err instanceof Error && (
-                  err.message.includes("stream cancelled by client") ||
-                  err.message.includes("cancelled by client") ||
-                  err.name === "AbortError"
-                )) ||
-                (typeof err === "string" && (err.includes("stream cancelled by client") || err.includes("cancelled by client")))
-
-              const classification = classifyProviderError(err)
-              const rejectReason = (err as UpstreamTimeoutError)?.rejectReason
-              console.error(
-                `[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} ` +
-                `status=${classification.action}:${classification.kind}` +
-                (classification.statusCode ? ` upstreamHttp=${classification.statusCode}` : "") +
-                (rejectReason ? ` timeout=${rejectReason}` : "") +
-                ` stage=mid_stream`,
-                err,
-              )
-              if (!isClientCancel) {
-                await reportRouteOutcome(target.providerId, { success: false, error: err })
-              }
-              await recordRequest({
-                userId: user.id,
-                ip,
-                modelLabel: target.label,
-                promptHash: cacheKey,
-                status: "failure",
-                rejectReason: isClientCancel ? "client_cancelled" : ("mid_stream_failure: " + failureReason(err)),
-                requestId: reqId,
-              })
-              logStructuredRequest({
-                requestId: reqId,
-                userId: user.id,
-                tier: complexity.tier,
-                routeDecision: target.label,
-                routeReason: target.label,
-                model: target.label,
-                attemptCount: attempt + 1,
-                ttftMs,
-                totalLatencyMs: Date.now() - started,
-                overheadMs: gatewayOverheadMs,
-                tokens: { input: 0, output: 0, cached: 0 },
-                costUsd: 0,
-                cancelled: isClientCancel,
-                failoverChain,
-                status: "failure",
-                errorReason: isClientCancel ? "client_cancelled" : ("mid_stream_failure: " + failureReason(err)),
-                stream: true,
-              })
-            }
-          })())
-
-          const reader = response.body!.getReader()
-          try {
-            while (true) {
-              const { value, done: isStreamDone } = await reader.read()
-              if (isStreamDone) break
-              controller.enqueue(value)
-            }
-          } finally {
-            reader.releaseLock()
-          }
-
-          controller.close()
-          return
-        }
-      } catch (err) {
-        if (err instanceof ContextWindowExceededError) {
-          bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `context_window_exceeded: required=${err.requiredTokens}, largest=${err.largestAvailable}` }))
-          const body = `data: ${JSON.stringify({
-            error: {
-              message: err.message,
-              type: "context_window_exceeded",
-              code: "context_window_exceeded",
-              required_tokens: err.requiredTokens,
-              largest_context_window: err.largestAvailable,
-              tier: err.tier,
-            }
-          })}\n\ndata: [DONE]\n\n`
-          controller.enqueue(encoder.encode(body))
-          controller.close()
-          return
-        }
-        if (err instanceof UnsupportedCapabilityError) {
-          const errCode = err.missingCapabilities.includes("tools") ? "NO_TOOL_CAPABLE_MODEL_AVAILABLE" : "unsupported_capability"
-          bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `${errCode.toLowerCase()}: ${err.missingCapabilities.join(",")}` }))
-          const body = `data: ${JSON.stringify({
-            error: {
-              message: err.message,
-              type: errCode.toLowerCase(),
-              code: errCode,
-              missing_capabilities: err.missingCapabilities,
-              tier: err.tier,
-            }
-          })}\n\ndata: [DONE]\n\n`
-          controller.enqueue(encoder.encode(body))
-          controller.close()
-          return
-        }
-        throw err
-      }
-
-      if (breakLoopErr) {
-        const classification = classifyProviderError(breakLoopErr)
-        bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `non_retryable: ${failureReason(breakLoopErr)}` }))
-        const readableMessage = classification.kind === "content_policy_violation" ? "Your request was rejected for violating safety policies." :
-                                classification.kind === "unsupported_parameter" ? "Your request contained an unsupported parameter or feature." :
-                                classification.kind === "context_length_exceeded" ? "Your request is too long for this model." :
-                                "Your request was rejected by the AI provider. Please check your prompt and attachments.";
-        const sseBody = `data: ${JSON.stringify({
-          error: {
-            message: readableMessage,
-            type: "upstream_rejected_request",
-            code: "UPSTREAM_REJECTED_REQUEST",
-            classification: classification.kind,
-            upstream_status: classification.statusCode ?? null,
-          }
-        })}\n\ndata: [DONE]\n\n`
-        controller.enqueue(encoder.encode(sseBody))
-        controller.close()
-        return
-      }
-
-      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "all_fallback_attempts_failed" }))
-      logStructuredRequest({
-        requestId: reqId,
-        userId: user.id,
-        tier: complexity.tier,
-        model: "n/a",
-        attemptCount: tried.size,
-        totalLatencyMs: Date.now() - started,
-        overheadMs: Math.round(performance.now() - reqStart),
-        tokens: { input: 0, output: 0, cached: 0 },
-        costUsd: 0,
-        cancelled: false,
-        failoverChain,
-        status: "failure",
-        errorReason: "all_fallback_attempts_failed",
-        stream: true,
-      })
-      const errorType = tried.size === 0 ? "NO_PROVIDERS_CONFIGURED" : "ALL_PROVIDERS_FAILED"
-      const message = tried.size === 0 ? "No AI providers configured — add one in the admin dashboard" : "All AI providers are currently unavailable. Please try again later."
-      const lastClassification = lastErr ? classifyProviderError(lastErr) : null
-      const hint = lastClassification ? hintForClassification(lastClassification) : "No AI providers responded successfully."
-      const sseBody = `data: ${JSON.stringify({
-        error: {
-          message: message,
-          type: errorType.toLowerCase(),
-          code: errorType,
-          hint,
-          last_failure: lastClassification
-            ? { kind: lastClassification.kind, action: lastClassification.action, statusCode: lastClassification.statusCode ?? null }
-            : null,
-        }
-      })}\n\ndata: [DONE]\n\n`
-      controller.enqueue(encoder.encode(sseBody))
-      controller.close()
-    },
-    cancel() {
-      stopKeepalive()
+  if (committedStream && committedTarget) {
+    const headers: Record<string, string> = {
+      ...SSE_HEADERS,
+      "x-zen-model": committedTarget.label,
     }
-  })
+    if (isSwitchedStream) headers["x-zen-model-switched"] = "true"
+    if (isSubstitutedStream) {
+      headers["x-zen-model-substituted"] = "true"
+      headers["x-zen-model-requested"] = parsed.data.model!
+    }
+    return new Response(committedStream, {
+      status: 200,
+      headers,
+    })
+  }
 
-  return new Response(clientStream, {
+  const streamElapsed = Date.now() - started
+  if (streamElapsed >= requestDeadlineMs || failoverChain.some(f => f.kind === "deadline_exceeded")) {
+    bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "gateway_deadline_exceeded", requestId: reqId }))
+    return c.json({
+      error: {
+        message: "Gateway deadline exceeded across fallback attempts",
+        type: "gateway_deadline_exceeded",
+        code: "gateway_deadline_exceeded",
+        failover_chain: failoverChain,
+      }
+    }, 504)
+  }
+
+  if (breakLoopErr) {
+    const classification = classifyProviderError(breakLoopErr)
+    const status = breakLoopStatus(classification)
+    bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `non_retryable: ${failureReason(breakLoopErr)}`, requestId: reqId }))
+    const readableMessage = classification.kind === "content_policy_violation" ? "Your request was rejected for violating safety policies." :
+                            classification.kind === "unsupported_parameter" ? "Your request contained an unsupported parameter or feature." :
+                            classification.kind === "context_length_exceeded" ? "Your request is too long for this model." :
+                            "Your request was rejected by the AI provider. Please check your prompt and attachments.";
+    const sseBody = `data: ${JSON.stringify({
+      error: {
+        message: readableMessage,
+        type: "upstream_rejected_request",
+        code: "UPSTREAM_REJECTED_REQUEST",
+        classification: classification.kind,
+        upstream_status: classification.statusCode ?? null,
+      }
+    })}\n\ndata: [DONE]\n\n`
+    return new Response(sseBody, {
+      status: status,
+      headers: SSE_HEADERS,
+    })
+  }
+
+  bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "all_fallback_attempts_failed", requestId: reqId }))
+  logStructuredRequest({
+    requestId: reqId,
+    userId: user.id,
+    tier: complexity.tier,
+    model: "n/a",
+    attemptCount: tried.size,
+    totalLatencyMs: Date.now() - started,
+    overheadMs: Math.round(performance.now() - reqStart),
+    tokens: { input: 0, output: 0, cached: 0 },
+    costUsd: 0,
+    cancelled: false,
+    failoverChain,
+    status: "failure",
+    errorReason: "all_fallback_attempts_failed",
+    stream: true,
+  })
+  const errorType = tried.size === 0 ? "NO_PROVIDERS_CONFIGURED" : "ALL_PROVIDERS_FAILED"
+  const message = tried.size === 0 ? "No AI providers configured — add one in the admin dashboard" : "All AI providers are currently unavailable. Please try again later."
+  const lastClassification = lastErr ? classifyProviderError(lastErr) : null
+  const hint = lastClassification ? hintForClassification(lastClassification) : "No AI providers responded successfully."
+  const sseBody = `data: ${JSON.stringify({
+    error: {
+      message: message,
+      type: errorType.toLowerCase(),
+      code: errorType,
+      hint,
+      last_failure: lastClassification
+        ? { kind: lastClassification.kind, action: lastClassification.action, statusCode: lastClassification.statusCode ?? null }
+        : null,
+    }
+  })}\n\ndata: [DONE]\n\n`
+  return new Response(sseBody, {
     status: 200,
     headers: SSE_HEADERS,
   })

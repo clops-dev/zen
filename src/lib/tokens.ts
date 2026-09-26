@@ -1,25 +1,13 @@
-import { countTokens, ALL_SPECIAL_TOKENS } from "gpt-tokenizer/encoding/cl100k_base"
+import { countTokens as countCl100k, ALL_SPECIAL_TOKENS as ALL_CL100K } from "gpt-tokenizer/encoding/cl100k_base"
+import { countTokens as countO200k, ALL_SPECIAL_TOKENS as ALL_O200K } from "gpt-tokenizer/encoding/o200k_base"
 
 const PER_MESSAGE_OVERHEAD = 4 // per OpenAI's published chat-format token rules: role\n + \n
 const PER_REQUEST_OVERHEAD = 2 // leading assistant priming
 
-// gpt-tokenizer's cl100k_base encoding rejects any string that contains a
-// "special" token sequence like ``, `<|fim_prefix|>`, `<|endoftext|>`
-// etc. — these are boundary markers used in OpenAI's chat-format wire
-// protocol, and the library refuses to encode strings that contain them
-// so a careless caller can't smuggle one into a prompt. By default it
-// throws `Disallowed special token found: …`.
-//
-// We use the counter for an upper-bound estimate, NOT to actually
-// tokenize a request the model will see. Real LLM calls go through
-// @ai-sdk/openai-compatible / @ai-sdk/anthropic, which have their own
-// tokenization that handles special tokens correctly. So for our
-// counting purposes, allowing all special tokens is safe — the bytes
-// get counted like any other plain bytes. This makes the gateway
-// robust to user prompts that happen to contain these marker strings
-// (e.g. someone pasting a chat template, an LLM trace, or markdown
-// fenced code blocks containing `<|...|>`).
-const COUNT_OPTIONS = { allowedSpecial: "all" as typeof ALL_SPECIAL_TOKENS }
+const COUNT_OPTIONS_CL100K = { allowedSpecial: "all" as typeof ALL_CL100K }
+const COUNT_OPTIONS_O200K = { allowedSpecial: "all" as typeof ALL_O200K }
+
+export type TokenizerType = "o200k" | "cl100k" | "anthropic" | "gemini" | "approx"
 
 export interface TokenCountInput {
   /** Pre-normalized system prompt (concatenated from system messages), or the
@@ -33,29 +21,47 @@ export interface TokenCountInput {
    * count — the provider will re-serialize these too, so the JSON form
    * matches what the model actually sees modulo whitespace. */
   tools?: ReadonlyArray<unknown>
+  /** P3.12: Model tokenizer type for accurate counting. Defaults to cl100k. */
+  tokenizer?: TokenizerType | string | null
 }
 
 /** Conservative token-count estimate of what an OpenAI-style chat completion
- * request will cost on the input side. Uses the cl100k_base encoding
- * (gpt-3.5/4 family); for non-OpenAI providers this is an approximation,
- * but the error is small relative to the context-window check we use it
- * for. Caches nothing — Bun starts fast and a single request is small. */
+ * request will cost on the input side.
+ * - Uses o200k_base for newer OpenAI models (gpt-4o, etc.)
+ * - Uses cl100k_base for gpt-3.5/gpt-4 models
+ * - For Anthropic and Gemini, applies a conservative 1.15x multiplier
+ * - For approx, applies a conservative 1.25x multiplier
+ * Returns an upper-bound estimate, not an exact count. */
 export function countInputTokens(input: TokenCountInput): number {
+  const normTokenizer = (input.tokenizer?.toLowerCase() ?? "cl100k") as TokenizerType
+  const isO200k = normTokenizer === "o200k" || normTokenizer.includes("o200k")
+  const counter = isO200k ? countO200k : countCl100k
+  const options = isO200k ? COUNT_OPTIONS_O200K : COUNT_OPTIONS_CL100K
+
   let total = PER_REQUEST_OVERHEAD
   for (const m of input.messages) {
     total += PER_MESSAGE_OVERHEAD
-    total += countTokens(serializeMessageContent(m), COUNT_OPTIONS)
+    total += counter(serializeMessageContent(m), options as any)
   }
   if (input.system) {
     total += PER_MESSAGE_OVERHEAD
-    total += countTokens(flattenSystem(input.system), COUNT_OPTIONS)
+    total += counter(flattenSystem(input.system), options as any)
   }
   if (input.tools && input.tools.length > 0) {
     // Provider serializes tools as a JSON array; match that and add a small
     // wrapper overhead. We don't try to be exact — only an upper bound.
-    total += countTokens(JSON.stringify(input.tools), COUNT_OPTIONS) + 8
+    total += counter(JSON.stringify(input.tools), options as any) + 8
   }
-  return total
+
+  // P3.12: Apply documented conservative multiplier for non-OpenAI models
+  let multiplier = 1.0
+  if (normTokenizer === "anthropic" || normTokenizer === "gemini") {
+    multiplier = 1.15 // 15% conservative margin for Claude / Gemini tokenization
+  } else if (normTokenizer === "approx" || (!isO200k && normTokenizer !== "cl100k")) {
+    multiplier = 1.25 // 25% conservative margin for generic/approx models
+  }
+
+  return Math.ceil(total * multiplier)
 }
 
 function flattenSystem(system: string | ReadonlyArray<unknown>): string {

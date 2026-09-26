@@ -1161,6 +1161,8 @@ export type ProviderErrorClassification = {
     | "quota_exceeded" | "provider_busy"
     | "content_policy_violation" | "unsupported_parameter" | "context_length_exceeded"
   statusCode?: number
+  retryAfterSeconds?: number
+  isModelSpecific?: boolean
 }
 
 /** OpenRouter passes upstream-provider error messages through with HTTP
@@ -1250,6 +1252,45 @@ function messageOf(err: unknown): string {
   return String(err)
 }
 
+export function parseRetryAfter(err: unknown): number | undefined {
+  if (!err) return undefined
+  const e = err as any
+
+  // 1. Check headers on error object (e.g. responseHeaders or headers)
+  const headers = e.responseHeaders || e.headers
+  if (headers) {
+    const raw = typeof headers.get === "function"
+      ? (headers.get("retry-after") || headers.get("x-ratelimit-reset-requests") || headers.get("x-ratelimit-reset-tokens"))
+      : (headers["retry-after"] || headers["Retry-After"] || headers["x-ratelimit-reset-requests"] || headers["x-ratelimit-reset-tokens"])
+    if (raw) {
+      const parsedNum = Number(raw)
+      if (Number.isFinite(parsedNum) && parsedNum > 0) return Math.ceil(parsedNum)
+      const parsedDate = Date.parse(raw)
+      if (!Number.isNaN(parsedDate)) {
+        const diffSec = Math.ceil((parsedDate - Date.now()) / 1000)
+        if (diffSec > 0) return diffSec
+      }
+    }
+  }
+
+  // 2. Parse from message or responseBody string
+  const text = `${messageOf(err)} ${typeof e.responseBody === "string" ? e.responseBody : ""}`
+  const m1 = text.match(/try again in\s+([0-9]+(?:\.[0-9]+)?)\s*s/i)
+  if (m1) return Math.ceil(Number(m1[1]))
+
+  const m2 = text.match(/retry after\s+([0-9]+)\s*seconds?/i)
+  if (m2) return Number(m2[1])
+
+  const m3 = text.match(/wait\s+([0-9]+)\s*s/i)
+  if (m3) return Number(m3[1])
+
+  if (/daily\s+(?:limit|quota|cap)|free[- ]tier\s+daily/i.test(text)) {
+    return 86400
+  }
+
+  return undefined
+}
+
 /** Classify an upstream provider error for the cross-model fallback loop.
  * See `ProviderErrorClassification` for the three-way action contract
  * (`continue` / `skip_candidate` / `break_loop`).
@@ -1260,13 +1301,26 @@ function messageOf(err: unknown): string {
  * isn't mis-read as HTTP 443. */
 export function classifyProviderError(err: unknown): ProviderErrorClassification {
   if (!err) return { action: "continue", kind: "unknown" }
+  const retryAfterSeconds = parseRetryAfter(err)
+
+  const buildResult = (
+    action: ProviderErrorClassification["action"],
+    kind: ProviderErrorClassification["kind"],
+    opts?: { statusCode?: number; isModelSpecific?: boolean },
+  ): ProviderErrorClassification => {
+    const res: ProviderErrorClassification = { action, kind }
+    if (opts?.statusCode !== undefined) res.statusCode = opts.statusCode
+    if (retryAfterSeconds !== undefined) res.retryAfterSeconds = retryAfterSeconds
+    if (opts?.isModelSpecific === true) res.isModelSpecific = true
+    return res
+  }
 
   // Our own timeout tag wins over anything the SDK might say.
   if (err instanceof UpstreamTimeoutError) {
-    return { action: "continue", kind: "timeout" }
+    return buildResult("continue", "timeout", { isModelSpecific: false })
   }
   if (isTimeoutError(err)) {
-    return { action: "continue", kind: "timeout" }
+    return buildResult("continue", "timeout", { isModelSpecific: false })
   }
 
   // Our own no-output tag — stream completed cleanly but emitted nothing.
@@ -1274,18 +1328,12 @@ export function classifyProviderError(err: unknown): ProviderErrorClassification
   // kind (not "unknown") so the ledger can tell this apart from real
   // unidentifiable errors.
   if (err instanceof NoOutputError) {
-    return { action: "continue", kind: "no_output" }
+    return buildResult("continue", "no_output", { isModelSpecific: true })
   }
 
-  // AI SDK v5 wraps upstream HTTP errors as APICallError with statusCode.
-  // We use the dynamic import path to avoid pulling @ai-sdk/provider into
-  // the typegraph; the runtime check is structural and works regardless.
-  const isAPICallError =
-    typeof (err as { constructor?: { name?: string } }).constructor?.name === "string" &&
-    (err as { constructor: { name: string } }).constructor.name === "APICallError"
-  // Some build setups strip class names — fall back to duck-typing on statusCode + isRetryable.
+  // Check statusCode directly on error object or APICallError
   const statusFromAPICall =
-    isAPICallError && typeof (err as { statusCode?: unknown }).statusCode === "number"
+    typeof (err as { statusCode?: unknown })?.statusCode === "number"
       ? (err as { statusCode: number }).statusCode
       : undefined
 
@@ -1296,7 +1344,7 @@ export function classifyProviderError(err: unknown): ProviderErrorClassification
   // that look like HTTP status codes. Detect them FIRST so we don't mis-read
   // "443" as a status and route a genuine network failure down the 4xx path.
   if (isNetworkError(err)) {
-    return { action: "continue", kind: "network" }
+    return buildResult("continue", "network", { isModelSpecific: false })
   }
 
   if (statusCode !== undefined) {
@@ -1307,21 +1355,29 @@ export function classifyProviderError(err: unknown): ProviderErrorClassification
     // normalized kind so the ledger is queryable per cause.
     if (statusCode === 429 || statusCode === 503) {
       const orKind = classifyOpenRouterMessage(msgLower, statusCode)
-      if (orKind) return { action: "continue", kind: orKind, statusCode }
+      if (orKind) {
+        const isModel = orKind === "quota_exceeded" || statusCode === 429
+        return buildResult("continue", orKind, { statusCode, isModelSpecific: isModel })
+      }
     }
-    if (statusCode === 429) return { action: "continue", kind: "rate_limited", statusCode }
-    if (statusCode >= 500 && statusCode < 600) return { action: "continue", kind: "server_error", statusCode }
-    if (statusCode === 400) return { action: "break_loop", kind: "bad_request", statusCode }
-    if (statusCode === 422) return { action: "break_loop", kind: "invalid_request", statusCode }
-    if (statusCode === 408) return { action: "continue", kind: "timeout", statusCode } // request timeout from the provider
+    if (statusCode === 429) return buildResult("continue", "rate_limited", { statusCode, isModelSpecific: true })
+    if (statusCode >= 500 && statusCode < 600) return buildResult("continue", "server_error", { statusCode, isModelSpecific: false })
+    if (statusCode === 400) {
+      if (msgLower.includes("context length") || msgLower.includes("context_length") || msgLower.includes("maximum context")) {
+        return buildResult("break_loop", "context_length_exceeded", { statusCode, isModelSpecific: true })
+      }
+      return buildResult("break_loop", "bad_request", { statusCode, isModelSpecific: false })
+    }
+    if (statusCode === 422) return buildResult("break_loop", "invalid_request", { statusCode, isModelSpecific: false })
+    if (statusCode === 408) return buildResult("continue", "timeout", { statusCode, isModelSpecific: false }) // request timeout from the provider
     // 401/403/404: this candidate is dead, but the request may still be
     // servable by another model — keep falling through the chain.
-    if (statusCode === 401) return { action: "skip_candidate", kind: "unauthorized", statusCode }
-    if (statusCode === 403) return { action: "skip_candidate", kind: "forbidden", statusCode }
-    if (statusCode === 404) return { action: "skip_candidate", kind: "not_found", statusCode }
+    if (statusCode === 401) return buildResult("skip_candidate", "unauthorized", { statusCode, isModelSpecific: false })
+    if (statusCode === 403) return buildResult("skip_candidate", "forbidden", { statusCode, isModelSpecific: false })
+    if (statusCode === 404) return buildResult("skip_candidate", "not_found", { statusCode, isModelSpecific: true })
     // Any other 4xx (410, 451, 418, etc.) signals the request is wrong
     // and another model won't help.
-    if (statusCode >= 400 && statusCode < 500) return { action: "break_loop", kind: "other_client_error", statusCode }
+    if (statusCode >= 400 && statusCode < 500) return buildResult("break_loop", "other_client_error", { statusCode, isModelSpecific: false })
   }
 
   // Detect "unsupported parameter for this model" without a 4xx — some
@@ -1335,13 +1391,13 @@ export function classifyProviderError(err: unknown): ProviderErrorClassification
     msgLower.includes("unknown tool") ||
     msgLower.includes("tool not supported")
   ) {
-    return { action: "break_loop", kind: "unsupported" }
+    return buildResult("break_loop", "unsupported", { isModelSpecific: true })
   }
 
   // Truly unknown — treat as continue so we still try other models, but
   // mark as "unknown" so the ledger/log can flag it. Better to over-fall-
   // back once than to bail on a transient we couldn't identify.
-  return { action: "continue", kind: "unknown" }
+  return buildResult("continue", "unknown", { isModelSpecific: false })
 }
 
 /** Non-streaming call. Returns the full text + usage once complete.
@@ -1355,6 +1411,7 @@ export async function callNonStreaming(
   temperature?: number,
   tools?: any[],
   toolChoice?: any,
+  deadlineMs?: number,
 ): Promise<CallResult> {
   const adapted = adaptRequestForCapabilities(
     messages, tools, toolChoice,
@@ -1362,7 +1419,9 @@ export async function callNonStreaming(
   )
   const { system, nonSystemMessages } = normalizeMessages(adapted.messages as any)
   const cached = applyPromptCaching(target, system, nonSystemMessages)
-  const timeoutMs = env.UPSTREAM_TIMEOUT_MS_NON_STREAMING
+  const timeoutMs = deadlineMs == null
+    ? env.UPSTREAM_TIMEOUT_MS_NON_STREAMING
+    : Math.max(1, Math.min(env.UPSTREAM_TIMEOUT_MS_NON_STREAMING, deadlineMs))
   const signal = newTimeoutSignal(timeoutMs)
 
   try {
@@ -1436,6 +1495,7 @@ export function callStreaming(
   modelLabel: string,
   tools?: any[],
   toolChoice?: any,
+  deadlineMs?: number,
 ): { response: Response; started: Promise<StreamStartResult>; done: Promise<CallResult> } {
   const adapted = adaptRequestForCapabilities(
     messages, tools, toolChoice,
@@ -1443,10 +1503,11 @@ export function callStreaming(
   )
   const { system, nonSystemMessages } = normalizeMessages(adapted.messages as any)
   const cached = applyPromptCaching(target, system, nonSystemMessages)
-  const connectMs = env.UPSTREAM_CONNECT_TIMEOUT_MS
-  const firstTokenMs = env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS
-  const idleMs = env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING
-  const maxMs = env.UPSTREAM_MAX_STREAM_DURATION_MS
+  const capToDeadline = (ms: number) => deadlineMs == null ? ms : Math.max(1, Math.min(ms, deadlineMs))
+  const connectMs = capToDeadline(env.UPSTREAM_CONNECT_TIMEOUT_MS)
+  const firstTokenMs = capToDeadline(env.UPSTREAM_FIRST_TOKEN_TIMEOUT_MS)
+  const idleMs = capToDeadline(env.UPSTREAM_IDLE_TIMEOUT_MS_STREAMING)
+  const maxMs = capToDeadline(env.UPSTREAM_MAX_STREAM_DURATION_MS)
 
   // One AbortController for this entire streaming call. Every timer below
   // funnels into the same controller via the shared racePromise. The

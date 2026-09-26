@@ -95,6 +95,30 @@ describe("countInputTokens", () => {
       expect(n).toBeGreaterThan(0)
     }
   })
+
+  test("P3.12: supports o200k_base tokenizer for newer OpenAI models", () => {
+    const input = { system: "", messages: [{ role: "user", content: "hello world" }], tools: [] }
+    const cl100kCount = countInputTokens({ ...input, tokenizer: "cl100k" })
+    const o200kCount = countInputTokens({ ...input, tokenizer: "o200k" })
+    expect(cl100kCount).toBeGreaterThan(0)
+    expect(o200kCount).toBeGreaterThan(0)
+  })
+
+  test("P3.12: applies 1.15x conservative factor for Anthropic and Gemini", () => {
+    const input = { system: "System prompt instructions", messages: [{ role: "user", content: "Write a function in python to sort an array." }], tools: [] }
+    const baseCount = countInputTokens({ ...input, tokenizer: "cl100k" })
+    const anthropicCount = countInputTokens({ ...input, tokenizer: "anthropic" })
+    const geminiCount = countInputTokens({ ...input, tokenizer: "gemini" })
+    expect(anthropicCount).toBe(Math.ceil(baseCount * 1.15))
+    expect(geminiCount).toBe(Math.ceil(baseCount * 1.15))
+  })
+
+  test("P3.12: applies 1.25x conservative factor for approx models", () => {
+    const input = { system: "System prompt instructions", messages: [{ role: "user", content: "Write a function in python to sort an array." }], tools: [] }
+    const baseCount = countInputTokens({ ...input, tokenizer: "cl100k" })
+    const approxCount = countInputTokens({ ...input, tokenizer: "approx" })
+    expect(approxCount).toBe(Math.ceil(baseCount * 1.25))
+  })
 })
 
 describe("defaultReserveFor", () => {
