@@ -5,6 +5,7 @@ export const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(8787),
   SESSION_SECRET: z.string().min(32, "must be at least 32 chars — generate with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""),
   BCRYPT_COST: z.coerce.number().int().min(4).max(15).default(12),
+  RATE_LIMIT_BACKEND: z.enum(["memory", "postgres"]).default("memory"),
 
   // Bootstrap admin — created automatically on first run if no admin exists.
   // Change the password via the dashboard after first login.

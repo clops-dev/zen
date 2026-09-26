@@ -1,5 +1,40 @@
 import type { MiddlewareHandler } from "hono"
 import { sql } from "../lib/db"
+import { env } from "../lib/env"
+
+export interface RateLimitDecision {
+  allowed: boolean
+  count: number
+  resetAt: number
+}
+
+/** Per-replica fixed-window limiter. It deliberately preserves the current
+ * user+IP semantics while removing the hot-path Postgres upsert. */
+export class MemoryRateLimiter {
+  private windows = new Map<string, { count: number; resetAt: number }>()
+
+  check(key: string, limit: number, windowMs: number, now = Date.now()): RateLimitDecision {
+    const resetAt = Math.floor(now / windowMs) * windowMs + windowMs
+    const existing = this.windows.get(key)
+    const entry = !existing || existing.resetAt <= now
+      ? { count: 0, resetAt }
+      : existing
+    entry.count++
+    this.windows.set(key, entry)
+    // Opportunistic bounded cleanup avoids a timer and keeps the hot path
+    // allocation-free in the normal case.
+    if (this.windows.size > 10_000) {
+      for (const [oldKey, old] of this.windows) {
+        if (old.resetAt <= now) this.windows.delete(oldKey)
+      }
+    }
+    return { allowed: entry.count <= limit, count: entry.count, resetAt: entry.resetAt }
+  }
+
+  clear(): void { this.windows.clear() }
+}
+
+export const memoryRateLimiter = new MemoryRateLimiter()
 
 export const rateLimit = (limit: number, windowMs: number): MiddlewareHandler => async (c, next) => {
   const user = c.var.apiUser
@@ -17,13 +52,19 @@ export const rateLimit = (limit: number, windowMs: number): MiddlewareHandler =>
   const retryAfterSec = Math.max(1, windowResetAt - Math.floor(now / 1000))
 
   try {
-    const updated = await sql`
+    const memoryKey = `${user.id}:${ip}`
+    const decision = env.RATE_LIMIT_BACKEND === "memory"
+      ? memoryRateLimiter.check(memoryKey, limit, windowMs, now)
+      : null
+    const count = decision
+      ? decision.count
+      : (await sql`
       INSERT INTO rate_limit_windows (user_id, ip, window_start, count)
       VALUES (${user.id}, ${ip}, ${windowStart}, 1)
       ON CONFLICT (user_id, ip, window_start) DO UPDATE SET count = rate_limit_windows.count + 1
       RETURNING count
-    `
-    if (updated[0].count > limit) {
+    `)[0].count
+    if (count > limit) {
       // OpenAI-compatible rate-limit error shape so clients can handle it correctly.
       c.header("Retry-After", String(retryAfterSec))
       c.header("X-RateLimit-Limit-Requests", String(limit))
