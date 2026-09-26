@@ -495,6 +495,30 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
   const encoder = new TextEncoder()
   let buffer = ""
 
+  // The Responses API assigns `output_index` across ALL output items —
+  // text/reasoning items and function_call items share one sequence. So a
+  // response that interleaves narration with multiple tool calls produces
+  // non-contiguous indices here (e.g. 1, 3, 5), which we'd otherwise forward
+  // verbatim into `delta.tool_calls[].index`. The AI SDK's tool-call tracker
+  // keys its internal array by that index, so non-contiguous values create
+  // `undefined` holes — and reading `.hasFinished` off a hole throws a
+  // TypeError that crashes the entire Bun process (see the doc comment on
+  // makeToolCallNormalizingFetch above, and normalizeSseToolCallResponse
+  // below, which already does this same remapping for the native
+  // /chat/completions SSE path). Remap to a contiguous 0,1,2... sequence
+  // here too, keyed by the raw output_index so `added` and the matching
+  // `arguments.delta` events for the same function call resolve to the
+  // same mapped index.
+  const toolCallIndexMap = new Map<number, number>()
+  let nextToolCallIndex = 0
+  function mapToolCallIndex(rawIndex: number): number {
+    const existing = toolCallIndexMap.get(rawIndex)
+    if (existing !== undefined) return existing
+    const mapped = nextToolCallIndex++
+    toolCallIndexMap.set(rawIndex, mapped)
+    return mapped
+  }
+
   function transformLine(line: string): string | null {
     const trimmed = line.trim()
     if (!trimmed.startsWith("data:")) return null
@@ -530,7 +554,7 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
               delta: {
                 tool_calls: [
                   {
-                    index: parsed.output_index ?? 0,
+                    index: mapToolCallIndex(parsed.output_index ?? 0),
                     id: parsed.item.call_id || parsed.item.id,
                     type: "function",
                     function: {
@@ -557,7 +581,7 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
               delta: {
                 tool_calls: [
                   {
-                    index: parsed.output_index ?? 0,
+                    index: mapToolCallIndex(parsed.output_index ?? 0),
                     function: {
                       arguments: parsed.delta,
                     },
