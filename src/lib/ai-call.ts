@@ -604,10 +604,10 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
         return `data: ${JSON.stringify(chunk)}`
       }
       if (parsed.type === "response.completed") {
+        const id = parsed.response?.id ?? `chatcmpl_${Date.now()}`
+        const created = Math.floor(Date.now() / 1000)
         const finishChunk = {
-          id: parsed.response?.id ?? `chatcmpl_${Date.now()}`,
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
+          id, object: "chat.completion.chunk", created,
           choices: [
             {
               index: 0,
@@ -615,9 +615,20 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
               finish_reason: "stop",
             },
           ],
+        }
+        // Usage must ride on its own trailing chunk with an EMPTY choices
+        // array — this mirrors the real OpenAI `stream_options.include_usage`
+        // wire format, which is what the AI SDK's openai-compatible SSE
+        // parser looks for when populating `result.usage`. Bundling usage
+        // onto the same chunk as finish_reason (non-empty choices) causes
+        // the parser to silently drop it, and every request through this
+        // Responses-API rewrite path reports 0 tokens / $0 cost.
+        const usageChunk = {
+          id, object: "chat.completion.chunk", created,
+          choices: [],
           usage: usageFromResponse(parsed),
         }
-        return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
+        return `data: ${JSON.stringify(finishChunk)}\n\ndata: ${JSON.stringify(usageChunk)}\n\ndata: [DONE]`
       }
       // `response.incomplete` fires when generation stops early (hit
       // max_output_tokens, content filter, etc.) without a normal
@@ -630,10 +641,10 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
       if (parsed.type === "response.incomplete") {
         const reason = parsed.response?.incomplete_details?.reason
         const finish_reason = reason === "max_output_tokens" ? "length" : reason === "content_filter" ? "content_filter" : "stop"
+        const id = parsed.response?.id ?? `chatcmpl_${Date.now()}`
+        const created = Math.floor(Date.now() / 1000)
         const finishChunk = {
-          id: parsed.response?.id ?? `chatcmpl_${Date.now()}`,
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
+          id, object: "chat.completion.chunk", created,
           choices: [
             {
               index: 0,
@@ -641,9 +652,15 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
               finish_reason,
             },
           ],
+        }
+        // See note in the `response.completed` branch above — usage goes on
+        // its own empty-choices chunk so the AI SDK's parser actually picks it up.
+        const usageChunk = {
+          id, object: "chat.completion.chunk", created,
+          choices: [],
           usage: usageFromResponse(parsed),
         }
-        return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
+        return `data: ${JSON.stringify(finishChunk)}\n\ndata: ${JSON.stringify(usageChunk)}\n\ndata: [DONE]`
       }
       // `response.failed` / a bare `error` event: the upstream call died
       // mid-stream. Terminate with [DONE] rather than letting the
@@ -651,10 +668,10 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
       // the client, and the gateway's fallback loop isn't blocked behind
       // an idle-timeout it would otherwise have to wait out.
       if (parsed.type === "response.failed" || parsed.type === "error") {
+        const id = parsed.response?.id ?? `chatcmpl_${Date.now()}`
+        const created = Math.floor(Date.now() / 1000)
         const finishChunk = {
-          id: parsed.response?.id ?? `chatcmpl_${Date.now()}`,
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
+          id, object: "chat.completion.chunk", created,
           choices: [
             {
               index: 0,
@@ -662,9 +679,15 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
               finish_reason: "stop",
             },
           ],
+        }
+        // See note in the `response.completed` branch above — usage goes on
+        // its own empty-choices chunk so the AI SDK's parser actually picks it up.
+        const usageChunk = {
+          id, object: "chat.completion.chunk", created,
+          choices: [],
           usage: usageFromResponse(parsed),
         }
-        return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
+        return `data: ${JSON.stringify(finishChunk)}\n\ndata: ${JSON.stringify(usageChunk)}\n\ndata: [DONE]`
       }
     } catch {}
     return null
