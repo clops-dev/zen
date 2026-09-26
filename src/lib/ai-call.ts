@@ -519,6 +519,15 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
     return mapped
   }
 
+  function usageFromResponse(parsed: any) {
+    const usage = parsed?.response?.usage
+    return {
+      prompt_tokens: usage?.input_tokens ?? 0,
+      completion_tokens: usage?.output_tokens ?? 0,
+      total_tokens: usage?.total_tokens ?? 0,
+    }
+  }
+
   function transformLine(line: string): string | null {
     const trimmed = line.trim()
     if (!trimmed.startsWith("data:")) return null
@@ -606,6 +615,7 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
               finish_reason: "stop",
             },
           ],
+          usage: usageFromResponse(parsed),
         }
         return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
       }
@@ -631,6 +641,7 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
               finish_reason,
             },
           ],
+          usage: usageFromResponse(parsed),
         }
         return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
       }
@@ -651,6 +662,7 @@ function transformResponsesSseToChatCompletionsSse(res: Response): Response {
               finish_reason: "stop",
             },
           ],
+          usage: usageFromResponse(parsed),
         }
         return `data: ${JSON.stringify(finishChunk)}\n\ndata: [DONE]`
       }
