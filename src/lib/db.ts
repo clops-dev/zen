@@ -33,7 +33,7 @@ import { env } from "./env"
  *   NULL by default, but only when this transform is enabled. Required for
  *   safe `UPDATE ... SET col = ${maybeUndefined}` patterns.
  */
-export const sql = postgres(env.DATABASE_URL, {
+const defaultSql = postgres(env.DATABASE_URL, {
   max: 10,
   idle_timeout: 30,
   max_lifetime: 60 * 30,
@@ -43,6 +43,29 @@ export const sql = postgres(env.DATABASE_URL, {
   onnotice: () => {},
   transform: { undefined: null },
 })
+
+let activeSql = defaultSql
+
+export function setSql(newSql: typeof defaultSql) {
+  activeSql = newSql
+}
+
+export function resetSql() {
+  activeSql = defaultSql
+}
+
+export const sql: typeof defaultSql = new Proxy((() => {}) as any, {
+  apply(_target, _thisArg, argArray) {
+    return (activeSql as any)(...argArray)
+  },
+  get(_target, prop) {
+    return (activeSql as any)[prop]
+  },
+  set(_target, prop, value) {
+    ;(activeSql as any)[prop] = value
+    return true
+  },
+}) as any
 
 /** Errors that look like transient connection issues — Neon cold-start,
  * pooler recycling, network blips, DNS hiccups. We retry these because the

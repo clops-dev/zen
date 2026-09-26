@@ -273,7 +273,7 @@ describe("Azure OpenAI / Microsoft Foundry Provider Support", () => {
         `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "partial answer" })}\n\n` +
         `data: ${JSON.stringify({ type: "response.incomplete", response: { id: "resp_1", incomplete_details: { reason: "max_output_tokens" } } })}\n\n`
       return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     try {
       const model = buildOpenAICompatibleModel(target({

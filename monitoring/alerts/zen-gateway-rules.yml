@@ -1,0 +1,50 @@
+# monitoring/alerts/zen-gateway-rules.yml
+# P1.11 — Prometheus alert rules for Zen Gateway
+
+groups:
+  - name: zen_gateway_alerts
+    rules:
+      - alert: GatewayHighOverhead
+        expr: histogram_quantile(0.95, sum(rate(zen_gateway_overhead_ms_bucket[5m])) by (le)) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway p95 overhead exceeded 80ms target (M1)"
+          description: "Gateway pre-dispatch overhead is {{ $value }}ms (target < 80ms)."
+
+      - alert: HighTTFT
+        expr: histogram_quantile(0.95, sum(rate(zen_ttft_ms_bucket[5m])) by (le)) > 2000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Time to first token p95 exceeded 2000ms (M2)"
+          description: "Time to first token is {{ $value }}ms."
+
+      - alert: HighErrorRate
+        expr: (sum(rate(zen_requests_total{status!="success"}[5m])) / sum(rate(zen_requests_total[5m]))) * 100 > 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Gateway error rate > 1%"
+          description: "Error rate is {{ $value }}% over the last 5 minutes."
+
+      - alert: FrequentFailovers
+        expr: sum(rate(zen_failovers_total[5m])) * 60 > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Upstream failovers > 10 per minute"
+          description: "High failover rate indicates upstream instability or rate limits."
+
+      - alert: HighHourlySpend
+        expr: sum(rate(zen_cost_usd_total[1h])) * 3600 > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway hourly spend exceeds $50"
+          description: "Hourly spend rate is ${{ $value }}."

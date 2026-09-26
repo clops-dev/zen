@@ -1,0 +1,75 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "TTFT p95 & Gateway Overhead p95",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(zen_ttft_ms_bucket[5m])) by (le))",
+          "legendFormat": "TTFT p95 (ms)"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(zen_gateway_overhead_ms_bucket[5m])) by (le))",
+          "legendFormat": "Gateway Overhead p95 (ms)"
+        }
+      ]
+    },
+    {
+      "title": "Error Rate & Failovers",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "(sum(rate(zen_requests_total{status!=\"success\"}[5m])) / sum(rate(zen_requests_total[5m]))) * 100",
+          "legendFormat": "Error Rate (%)"
+        },
+        {
+          "expr": "sum(rate(zen_failovers_total[5m])) by (kind)",
+          "legendFormat": "Failover: {{kind}}"
+        }
+      ]
+    },
+    {
+      "title": "Request Throughput by Tier",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(zen_requests_total[5m])) by (tier)",
+          "legendFormat": "Tier: {{tier}}"
+        }
+      ]
+    },
+    {
+      "title": "Spend Rate ($ / hour) & Tokens",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(zen_cost_usd_total[1h])) * 3600",
+          "legendFormat": "Spend USD/hr"
+        },
+        {
+          "expr": "sum(rate(zen_tokens_total[5m])) by (direction)",
+          "legendFormat": "Tokens: {{direction}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["zen-gateway", "ai", "llm"],
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Zen Gateway — Health & Observability",
+  "version": 1
+}

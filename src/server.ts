@@ -9,11 +9,13 @@ import { userApi } from "./routes/user-api"
 import { requestId } from "./middleware/request-id"
 import { readyz } from "./lib/readiness"
 import { log } from "./lib/logger"
+import { renderMetrics } from "./lib/metrics"
 
 import { sql, withDbResilience, isTransientDbError } from "./lib/db"
 import { existsSync, statSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+
 
 const app = new Hono()
 const isProd = (process.env.NODE_ENV ?? "development") === "production"
@@ -73,6 +75,30 @@ app.get("/healthz", async (c) => {
     timestamp: new Date().toISOString()
   }, ok ? 200 : 503)
 })
+
+// ---------------------------------------------------------------------------
+// P1.9 — Prometheus metrics endpoint.
+// Guarded by METRICS_BEARER_TOKEN. Set it in your .env to enable.
+// If unset, the endpoint returns 404 to avoid exposing internal state.
+// ---------------------------------------------------------------------------
+app.get("/metrics", (c) => {
+  const token = process.env.METRICS_BEARER_TOKEN
+  if (!token) {
+    // Metrics endpoint is disabled — return 404 so it looks like any other
+    // non-existent path and doesn't reveal that metrics collection is running.
+    return c.text("not found", 404)
+  }
+  const auth = c.req.header("Authorization")
+  if (!auth || auth !== `Bearer ${token}`) {
+    return c.text("unauthorized", 401)
+  }
+  return new Response(renderMetrics(), {
+    status: 200,
+    headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
+  })
+})
+
+
 
 app.get("/", (c) => c.redirect("/zencode", 303))
 

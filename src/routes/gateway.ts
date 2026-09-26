@@ -13,6 +13,8 @@ import { hashPrompt, getCached, setCached } from "../lib/cache"
 import { calcCost } from "../lib/pricing"
 import { countInputTokens } from "../lib/tokens"
 import { SSE_HEADERS } from "../lib/sse-headers"
+import { log } from "../lib/logger"
+import { recordRequestMetrics, recordStageMs } from "../lib/metrics"
 
 export const gateway = new Hono()
 
@@ -196,6 +198,62 @@ async function recordRequest(fields: {
   }
 }
 
+function logStructuredRequest(fields: {
+  requestId: string
+  userId: string
+  tier: string
+  routeDecision?: string
+  routeReason?: string
+  model: string
+  attemptCount: number
+  ttftMs?: number | null
+  totalLatencyMs: number
+  overheadMs?: number
+  tokens: { input: number; output: number; cached: number }
+  costUsd: number
+  cancelled: boolean
+  failoverChain: Array<{ kind: string; model?: string }>
+  status: "success" | "failure" | "rejected"
+  errorReason?: string
+  stream: boolean
+}) {
+  log.info("gateway request completed", {
+    request_id: fields.requestId,
+    user_id: fields.userId,
+    tier: fields.tier,
+    route_decision: fields.routeDecision ?? fields.model,
+    route_reason: fields.routeReason ?? "tier_pick",
+    model: fields.model,
+    attempt_count: fields.attemptCount,
+    ttft_ms: fields.ttftMs ?? null,
+    total_latency_ms: fields.totalLatencyMs,
+    gateway_overhead_ms: fields.overheadMs ?? 0,
+    input_tokens: fields.tokens.input,
+    output_tokens: fields.tokens.output,
+    cached_tokens: fields.tokens.cached,
+    cost_usd: fields.costUsd,
+    cancelled: fields.cancelled,
+    failover_chain: fields.failoverChain,
+    status: fields.status,
+    error_reason: fields.errorReason ?? undefined,
+  })
+
+  recordRequestMetrics({
+    status: fields.status,
+    tier: fields.tier,
+    stream: fields.stream,
+    cancelled: fields.cancelled,
+    ttftMs: fields.ttftMs ?? null,
+    overheadMs: fields.overheadMs ?? 0,
+    totalMs: fields.totalLatencyMs,
+    inputTokens: fields.tokens.input,
+    outputTokens: fields.tokens.output,
+    cachedTokens: fields.tokens.cached,
+    costUsd: fields.costUsd,
+    failoverChain: fields.failoverChain,
+  })
+}
+
 gateway.get("/models", requireApiKey(), async (c) => {
   const rows = await withDbResilience(() => sql`
     SELECT p.name AS provider, m.model_id, m.label, m.context_window
@@ -310,7 +368,9 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   }
 
   const started = Date.now()
+  const reqStart = performance.now()
   const tried = new Set<string>()
+  const failoverChain: Array<{ kind: string; model?: string }> = []
   let lastErr: unknown = null
   let breakLoopErr: unknown = null
 
@@ -357,6 +417,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
         const target = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements, parsed.data.model)
         if (!target) break
         tried.add(target.modelRowId)
+        const gatewayOverheadMs = Math.round(performance.now() - reqStart)
 
         try {
           const result = await callNonStreaming(target, messages as any, maxOutputTokens, temperature, tools, tool_choice)
@@ -394,6 +455,24 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             }
           })())
           bg(setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens))
+
+          logStructuredRequest({
+            requestId: reqId,
+            userId: user.id,
+            tier: complexity.tier,
+            routeDecision: target.label,
+            routeReason: target.label,
+            model: target.label,
+            attemptCount: attempt + 1,
+            totalLatencyMs: latencyMs,
+            overheadMs: gatewayOverheadMs,
+            tokens: { input: result.inputTokens, output: result.outputTokens, cached: (result as any).cachedTokens ?? 0 },
+            costUsd: cost,
+            cancelled: false,
+            failoverChain,
+            status: "success",
+            stream: false,
+          })
 
           console.log(`[gateway] non-stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} latencyMs=${latencyMs} tokens=${result.inputTokens}+${result.outputTokens} status=success`)
           return c.json({
@@ -442,6 +521,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
             err,
           )
           lastErr = err
+          failoverChain.push({ kind: classification.kind, model: target.label })
           bg(reportRouteOutcome(target.providerId, { success: false, error: err }))
           bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(err), requestId: reqId }))
           if (classification.action === "break_loop") {
@@ -486,6 +566,22 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       const classification = classifyProviderError(breakLoopErr)
       const status = breakLoopStatus(classification)
       bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: `non_retryable: ${failureReason(breakLoopErr)}`, requestId: reqId }))
+      logStructuredRequest({
+        requestId: reqId,
+        userId: user.id,
+        tier: complexity.tier,
+        model: "n/a",
+        attemptCount: tried.size,
+        totalLatencyMs: Date.now() - started,
+        overheadMs: Math.round(performance.now() - reqStart),
+        tokens: { input: 0, output: 0, cached: 0 },
+        costUsd: 0,
+        cancelled: false,
+        failoverChain,
+        status: "rejected",
+        errorReason: `non_retryable: ${failureReason(breakLoopErr)}`,
+        stream: false,
+      })
       const readableMessage = classification.kind === "content_policy_violation" ? "Your request was rejected for violating safety policies." :
                               classification.kind === "unsupported_parameter" ? "Your request contained an unsupported parameter or feature." :
                               classification.kind === "context_length_exceeded" ? "Your request is too long for this model." :
@@ -502,6 +598,22 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
     }
 
     bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "all_fallback_attempts_failed", requestId: reqId }))
+    logStructuredRequest({
+      requestId: reqId,
+      userId: user.id,
+      tier: complexity.tier,
+      model: "n/a",
+      attemptCount: tried.size,
+      totalLatencyMs: Date.now() - started,
+      overheadMs: Math.round(performance.now() - reqStart),
+      tokens: { input: 0, output: 0, cached: 0 },
+      costUsd: 0,
+      cancelled: false,
+      failoverChain,
+      status: "failure",
+      errorReason: "all_fallback_attempts_failed",
+      stream: false,
+    })
     const lastClassification = lastErr ? classifyProviderError(lastErr) : null
     const hint = lastClassification
       ? hintForClassification(lastClassification)
@@ -551,6 +663,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           const target: RouteTarget | null = await pickRoute(complexity.tier, quota.maxComplexityTier, tried, requirements, parsed.data.model)
           if (!target) break
           tried.add(target.modelRowId)
+          const gatewayOverheadMs = Math.round(performance.now() - reqStart)
 
           if (attempt > 0) {
             controller.enqueue(encoder.encode(`: retrying prompt with ${target.label}...\n\n`))
@@ -584,6 +697,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
               logMessageDiagnostics(messages as any[], "incoming_request")
             }
             lastErr = startResult.error
+            failoverChain.push({ kind: classification.kind, model: target.label })
             bg(reportRouteOutcome(target.providerId, { success: false, error: startResult.error }))
             bg(recordRequest({ userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey, status: "failure", rejectReason: failureReason(startResult.error), requestId: reqId }))
             if (classification.action === "break_loop") {
@@ -594,7 +708,8 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
           }
 
           // Committed — this target actually produced output, stream its response to the client.
-          console.log(`[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} stream=committed firstTokenReceived=true elapsedMs=${Date.now() - started}`)
+          const ttftMs = Date.now() - started
+          console.log(`[gateway] stream ${target.label} attempt=${attempt + 1}/${MAX_FALLBACK_ATTEMPTS} stream=committed firstTokenReceived=true elapsedMs=${ttftMs}`)
           bg((async () => {
             try {
               const result = await done
@@ -629,6 +744,24 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
                 }
               }
               await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
+              logStructuredRequest({
+                requestId: reqId,
+                userId: user.id,
+                tier: complexity.tier,
+                routeDecision: target.label,
+                routeReason: target.label,
+                model: target.label,
+                attemptCount: attempt + 1,
+                ttftMs,
+                totalLatencyMs: latencyMs,
+                overheadMs: gatewayOverheadMs,
+                tokens: { input: result.inputTokens, output: result.outputTokens, cached: (result as any).cachedTokens ?? 0 },
+                costUsd: cost,
+                cancelled: false,
+                failoverChain,
+                status: "success",
+                stream: true,
+              })
             } catch (err) {
               const isClientCancel =
                 (err instanceof Error && (
@@ -659,6 +792,25 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
                 status: "failure",
                 rejectReason: isClientCancel ? "client_cancelled" : ("mid_stream_failure: " + failureReason(err)),
                 requestId: reqId,
+              })
+              logStructuredRequest({
+                requestId: reqId,
+                userId: user.id,
+                tier: complexity.tier,
+                routeDecision: target.label,
+                routeReason: target.label,
+                model: target.label,
+                attemptCount: attempt + 1,
+                ttftMs,
+                totalLatencyMs: Date.now() - started,
+                overheadMs: gatewayOverheadMs,
+                tokens: { input: 0, output: 0, cached: 0 },
+                costUsd: 0,
+                cancelled: isClientCancel,
+                failoverChain,
+                status: "failure",
+                errorReason: isClientCancel ? "client_cancelled" : ("mid_stream_failure: " + failureReason(err)),
+                stream: true,
               })
             }
           })())
@@ -735,6 +887,22 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
       }
 
       bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "all_fallback_attempts_failed" }))
+      logStructuredRequest({
+        requestId: reqId,
+        userId: user.id,
+        tier: complexity.tier,
+        model: "n/a",
+        attemptCount: tried.size,
+        totalLatencyMs: Date.now() - started,
+        overheadMs: Math.round(performance.now() - reqStart),
+        tokens: { input: 0, output: 0, cached: 0 },
+        costUsd: 0,
+        cancelled: false,
+        failoverChain,
+        status: "failure",
+        errorReason: "all_fallback_attempts_failed",
+        stream: true,
+      })
       const errorType = tried.size === 0 ? "NO_PROVIDERS_CONFIGURED" : "ALL_PROVIDERS_FAILED"
       const message = tried.size === 0 ? "No AI providers configured — add one in the admin dashboard" : "All AI providers are currently unavailable. Please try again later."
       const lastClassification = lastErr ? classifyProviderError(lastErr) : null

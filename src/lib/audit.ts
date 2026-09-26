@@ -47,6 +47,9 @@ export type AuditAction =
   // credits
   | "credits.grant"
   | "credits.adjustment"
+  // payments
+  | "payments.confirm"
+  | "payments.reject"
   // system
   | "system.bootstrap"
   | "system.migration_applied"
@@ -58,6 +61,7 @@ export type AuditResource =
   | "routing"
   | "combo"
   | "api_key"
+  | "credit_transaction"
   | "system"
   | "auth"
 
