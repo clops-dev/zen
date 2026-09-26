@@ -2,7 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import { setCookie, deleteCookie } from "hono/cookie"
 import { sql, withDbResilience } from "../lib/db"
-import { hashPassword, verifyPassword } from "../lib/password"
+import { hashPassword, isLegacyBcryptHash, verifyDummyPassword, verifyPassword } from "../lib/password"
 import { issueSession, SESSION_COOKIE, SESSION_COOKIE_OPTIONS } from "../lib/session"
 import { generateApiKey } from "../lib/apikeys"
 import { requireSession } from "../middleware/session-auth"
@@ -52,11 +52,24 @@ auth.post("/login", async (c) => {
 
   const { email, password } = parsed.data
   const rows = await withDbResilience(() => sql`SELECT id, password_hash, role FROM users WHERE email = ${email}`)
-  if (rows.length === 0) return c.json({ error: "invalid credentials" }, 401)
+  if (rows.length === 0) {
+    await verifyDummyPassword(password)
+    return c.json({ error: "invalid credentials" }, 401)
+  }
 
   const user = rows[0] as { id: string; password_hash: string; role: "user" | "admin" }
   const ok = await verifyPassword(password, user.password_hash)
   if (!ok) return c.json({ error: "invalid credentials" }, 401)
+
+  // Upgrade successful legacy bcrypt logins opportunistically. A failed
+  // upgrade does not reject an otherwise valid login.
+  if (isLegacyBcryptHash(user.password_hash)) {
+    const upgradedHash = await hashPassword(password)
+    await withDbResilience(() => sql`
+      UPDATE users SET password_hash = ${upgradedHash}
+      WHERE id = ${user.id} AND password_hash = ${user.password_hash}
+    `).catch((err) => console.warn("[auth] password hash upgrade failed:", err))
+  }
 
   const session = issueSession(user.id, user.role)
   setCookie(c, SESSION_COOKIE, session.token, SESSION_COOKIE_OPTIONS)
