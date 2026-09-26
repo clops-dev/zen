@@ -1,5 +1,33 @@
 import { describe, test, expect } from "bun:test"
-import { classifyComplexity } from "./complexity"
+import { classifyComplexity, isAgentRequest } from "./complexity"
+
+describe("P3.2: Agent traffic detection", () => {
+  test("detects tools parameter as agent traffic", () => {
+    expect(isAgentRequest([{ role: "user", content: "hello" }], [{ type: "function" }])).toBe(true)
+  })
+
+  test("detects message with role 'tool' as agent traffic", () => {
+    expect(isAgentRequest([
+      { role: "user", content: "do something" },
+      { role: "assistant", content: "calling tool" },
+      { role: "tool", content: "tool output" },
+    ])).toBe(true)
+  })
+
+  test("detects assistant message with tool_calls as agent traffic", () => {
+    expect(isAgentRequest([
+      { role: "user", content: "do something" },
+      { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function" }] },
+    ])).toBe(true)
+  })
+
+  test("returns false for regular chat without tools or tool messages", () => {
+    expect(isAgentRequest([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" },
+    ])).toBe(false)
+  })
+})
 
 describe("P3.3: Complexity classifier word-boundary & last-user scoring", () => {
   test("happy birthday does not match 'app' substring", () => {

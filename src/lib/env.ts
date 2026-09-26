@@ -87,6 +87,13 @@ function intEnv(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
 }
 
+function floatEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === "") return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : fallback
+}
+
 // Per-upstream-call timeouts. Non-streaming uses a single fixed deadline
 // (UPSTREAM_TIMEOUT_MS_NON_STREAMING). Streaming uses FOUR independent timers:
 //   1. UPSTREAM_CONNECT_TIMEOUT_MS — TCP+TLS handshake to the provider must
@@ -145,5 +152,23 @@ export const env = {
    * ms (10 min). Must be > UPSTREAM_IDLE_TIMEOUT_MS_STREAMING. */
   get UPSTREAM_MAX_STREAM_DURATION_MS() {
     return intEnv("UPSTREAM_MAX_STREAM_DURATION_MS", 600_000)
+  },
+  /** P3.2: Configurable agent tier for tool/agent traffic. */
+  get AGENT_TIER(): "trivial" | "simple" | "medium" | "complex" {
+    const raw = process.env.AGENT_TIER
+    if (raw === "trivial" || raw === "simple" || raw === "medium" || raw === "complex") return raw
+    return "complex"
+  },
+  /** P3.8: Overall request deadline across all fallback attempts (ms). */
+  get REQUEST_DEADLINE_MS(): number {
+    return intEnv("REQUEST_DEADLINE_MS", 60_000)
+  },
+  /** P3.10: Maximum fallback attempts per request before failing. */
+  get MAX_FALLBACK_ATTEMPTS(): number {
+    return intEnv("MAX_FALLBACK_ATTEMPTS", 4)
+  },
+  /** P3.11: Shadow route sampling rate (0 to 1). */
+  get SHADOW_ROUTE_SAMPLE_RATE(): number {
+    return floatEnv("SHADOW_ROUTE_SAMPLE_RATE", 0)
   },
 }

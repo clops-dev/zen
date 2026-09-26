@@ -3,7 +3,8 @@ import { z } from "zod"
 import { sql, withDbResilience } from "../lib/db"
 import { requireApiKey } from "../middleware/api-key"
 import { rateLimit } from "../middleware/rate-limit"
-import { classifyComplexity } from "../lib/complexity"
+import { classifyComplexity, isAgentRequest } from "../lib/complexity"
+import { env } from "../lib/env"
 import { pickRoute, reportRouteOutcome, type RouteTarget, ContextWindowExceededError, UnsupportedCapabilityError } from "../lib/routing"
 import { callNonStreaming, callStreaming, classifyProviderError, type StreamStartResult } from "../lib/ai-call"
 import { UpstreamTimeoutError } from "../lib/ai-call"
@@ -326,7 +327,10 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
   }
 
 
-  const complexity = classifyComplexity(messages as any)
+  const isAgent = isAgentRequest(messages as any, tools)
+  const complexity = isAgent
+    ? { tier: env.AGENT_TIER, score: 99, reasons: ["agent_traffic_bypass"] }
+    : classifyComplexity(messages as any)
 
   // ---- cache check ----
   const cacheKey = hashPrompt(messages as any, complexity.tier)

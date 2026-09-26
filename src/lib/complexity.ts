@@ -6,6 +6,20 @@ export interface ComplexityScore {
   reasons: string[]
 }
 
+/** Returns true if the request contains tools or previous tool interactions.
+ * P3.2: Agent traffic bypasses the classifier and routes directly to the agent tier. */
+export function isAgentRequest(
+  messages: Array<{ role: string; content?: unknown; tool_calls?: unknown }>,
+  tools?: unknown[],
+): boolean {
+  if (Array.isArray(tools) && tools.length > 0) return true
+  for (const m of messages) {
+    if (m.role === "tool") return true
+    if (Array.isArray((m as any).tool_calls) && (m as any).tool_calls.length > 0) return true
+  }
+  return false
+}
+
 const GREETING_RE =
   /^\s*(hi|hey|hello|yo|salut|thanks|thank you|ok|okay|bye|cool|nice|good morning|good night)\W*$/i
 
