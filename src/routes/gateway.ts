@@ -18,7 +18,7 @@ import { callNonStreaming, callStreaming, classifyProviderError, type StreamStar
 import { UpstreamTimeoutError } from "../lib/ai-call"
 import { checkQuota, recordUsage } from "../lib/quota"
 import { deductCredits, usdToDt, InsufficientCreditsError } from "../lib/credits"
-import { hashPrompt, getCached, setCached } from "../lib/cache"
+import { hashPrompt, getCached, isResponseCacheEligible, setCached } from "../lib/cache"
 import { calcCost } from "../lib/pricing"
 import { countInputTokens } from "../lib/tokens"
 import { SSE_HEADERS } from "../lib/sse-headers"
@@ -364,10 +364,20 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
     : classifyComplexity(messages as any)
 
   // ---- cache check ----
-  const cacheKey = hashPrompt(messages as any, complexity.tier)
-  // Tool/agent requests are stateful, so a cached response can corrupt the
-  // loop and bypass the conversation affinity decision.
-  const cached = isAgent ? null : await getCached(cacheKey).catch((err) => {
+  // Cache entries must never cross account, model, or generation-parameter
+  // boundaries. Cache only explicit, deterministic non-agent requests.
+  const cacheEligible = isResponseCacheEligible({
+    model: parsed.data.model,
+    temperature,
+    isAgent,
+  })
+  const cacheKey = hashPrompt(messages as any, {
+    userId: user.id,
+    model: parsed.data.model ?? "zen/auto",
+    maxOutputTokens,
+    temperature: temperature ?? -1,
+  })
+  const cached = !cacheEligible ? null : await getCached(cacheKey).catch((err) => {
     console.error("[gateway] cache read failed:", err)
     return null
   })
@@ -522,7 +532,9 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
               }
             }
           })())
-          bg(setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens))
+          if (cacheEligible && result.content.length > 0 && result.toolCalls?.length === 0) {
+            bg(setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens))
+          }
 
           logStructuredRequest({
             requestId: reqId,
@@ -846,7 +858,9 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async 
               }
             }
           }
-          await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
+          if (cacheEligible && result.content.length > 0) {
+            await setCached(cacheKey, target.label, result.content, result.inputTokens, result.outputTokens)
+          }
           logStructuredRequest({
             requestId: reqId,
             userId: user.id,

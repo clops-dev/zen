@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { calcCost } from "./pricing"
 
 describe("calcCost", () => {
@@ -50,5 +51,14 @@ describe("calcCost", () => {
   test("handles zero/free model pricing correctly", () => {
     const cost = calcCost(0, 0, 100_000, 50_000)
     expect(cost).toBe(0)
+  })
+
+  test("has a migration that prices gpt-5.6-luna input tokens", () => {
+    const migration = readFileSync("migrations/023_gpt_5_6_luna_pricing.sql", "utf8")
+
+    expect(migration).toContain("model_id = 'gpt-5.6-luna'")
+    expect(migration).toMatch(/input_price_per_1m\s*=\s*0\.2/)
+    expect(migration).toMatch(/output_price_per_1m\s*=\s*1\.2/)
+    expect(migration).toMatch(/input_cache_read_price_per_1m\s*=\s*0\.02/)
   })
 })

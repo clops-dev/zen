@@ -1,8 +1,34 @@
 import { createHash } from "node:crypto"
 import { sql, withDbResilience } from "./db"
 
-export function hashPrompt(messages: Array<{ role: string; content: unknown }>, salt: string): string {
-  const normalized = JSON.stringify(messages.map((m) => ({ role: m.role, content: m.content }))) + "::" + salt
+export interface ResponseCacheScope {
+  userId: string
+  model: string
+  maxOutputTokens: number
+  temperature: number
+}
+
+/**
+ * Cache only deterministic requests for an explicit model. Automatic routing,
+ * tool use, and provider-default sampling can all make a cached answer wrong.
+ */
+export function isResponseCacheEligible(input: {
+  model?: string
+  temperature?: number
+  isAgent: boolean
+}): input is { model: string; temperature: 0; isAgent: false } {
+  return input.isAgent === false
+    && input.temperature === 0
+    && typeof input.model === "string"
+    && input.model.length > 0
+    && !input.model.startsWith("zen/")
+}
+
+export function hashPrompt(messages: Array<{ role: string; content: unknown }>, scope: ResponseCacheScope): string {
+  const normalized = JSON.stringify({
+    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    scope,
+  })
   return createHash("sha256").update(normalized).digest("hex")
 }
 
