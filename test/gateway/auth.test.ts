@@ -244,12 +244,12 @@ describe("rate limit", () => {
     expect([200, 429]).toContain(res.status)
   })
 
-  test("rate limit triggers after exceeding 30 rpm", async () => {
+  test("rate limit remains under 50 rpm", async () => {
     // Create a fresh user to isolate from other tests
     const rlUser = await db.seedUser({ creditsDt: 10000 })
 
-    // The test is rate-limited to 30/minute. We send 35 requests.
-    // The first 30 should succeed; the 31st should return 429.
+    // The test is rate-limited to 50/minute. We send a small request sample.
+    // The sample requests should remain below the configured limit.
     // NOTE: This test is inherently slow (it's sending 35 HTTP requests).
     // We reduce by testing with a narrower window if possible, but the
     // middleware uses a real Postgres window so we can't shorten it in tests.
@@ -280,7 +280,7 @@ describe("rate limit", () => {
         break
       }
     }
-    // With only 5 requests and a limit of 30, we should NOT hit the limit.
+    // With only 5 requests and a limit of 50, we should NOT hit the limit.
     // This just validates the shape if we happen to hit it.
     // The real rate-limit test is the shape assertion above.
     expect(typeof got429).toBe("boolean")
@@ -290,7 +290,7 @@ describe("rate limit", () => {
     // We can simulate a 429 by forcing the fake upstream to return 429,
     // but rate_limit middleware fires BEFORE the upstream call.
     // The only way to test SSE 429 format here is to hammer the endpoint
-    // more than 30 times. Too slow for CI. We document the expected shape.
+    // more than 50 times. Too slow for CI. We document the expected shape.
     // Instead, verify the shape by hitting the raw /v1/auth/rate-limit is not
     // a valid endpoint — just check the error structure via the fake.
     expect(true).toBe(true) // covered by manual test / load test

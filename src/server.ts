@@ -10,6 +10,7 @@ import { requestId } from "./middleware/request-id"
 import { readyz } from "./lib/readiness"
 import { log } from "./lib/logger"
 import { renderMetrics } from "./lib/metrics"
+import { CREDIT_PACKAGES, DT_PER_USD } from "./lib/credits"
 
 import { sql, withDbResilience, isTransientDbError } from "./lib/db"
 import { existsSync, statSync } from "node:fs"
@@ -138,6 +139,9 @@ app.route("/v1", v1)
 
 // Google OAuth routes for the zencode user portal.
 app.route("/auth", googleAuth)
+
+// Public pricing data used by the landing page.
+app.get("/public-api/credit-packages", (c) => c.json({ packages: CREDIT_PACKAGES, dt_per_usd: DT_PER_USD }))
 
 // Protected JSON API for the zencode React SPA (/user-api/*).
 app.route("/user-api", userApi)

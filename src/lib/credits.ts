@@ -29,8 +29,16 @@ export const MIN_PACKAGE_DT = 5
 /** Packages must be multiples of this many DT. */
 export const PACKAGE_STEP_DT = 5
 
+export const CREDIT_PACKAGES = [
+  { dt: 15, usd: 5 },
+  { dt: 30, usd: 10 },
+  { dt: 45, usd: 15 },
+  { dt: 60, usd: 20 },
+  { dt: 150, usd: 50 },
+] as const
+
 /**
- * Welcome bonus granted to every new user on signup.
+  * Welcome bonus granted to every new user on signup.
  */
 export const WELCOME_CREDITS_DT = 1 * DT_PER_USD
 

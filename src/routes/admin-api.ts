@@ -16,10 +16,13 @@ import {
   rejectPaymentDemand,
   getUserBillingSummary,
   getAdminBillingOverview,
+  CREDIT_PACKAGES,
 } from "../lib/credits"
 
 export const adminApi = new Hono()
 adminApi.use("*", requireAdmin())
+
+adminApi.get("/credit-packages", (c) => c.json({ packages: CREDIT_PACKAGES, dt_per_usd: DT_PER_USD }))
 
 const jsonError = (c: any, status: number, code: string, message?: string) =>
   c.json({ error: code, message: message ?? code }, status)

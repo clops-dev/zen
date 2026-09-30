@@ -310,7 +310,7 @@ Seven starter combo templates are inserted by the migration.
   the public internet.
 - The classifier is unsupervised heuristics, not measured against your real
   traffic yet — expect some misroutes until you tune the keyword list.
-- Rate limiting is per-user, Postgres-backed, 30 req/min by default
+- Rate limiting is per-user, Postgres-backed, 50 req/min by default
   (`src/routes/gateway.ts`) — adjust if that's wrong for your traffic shape.
 
 ---

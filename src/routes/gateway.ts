@@ -20,6 +20,7 @@ import { checkQuota, recordUsage } from "../lib/quota"
 import { deductCredits, usdToDt, InsufficientCreditsError } from "../lib/credits"
 import { hashPrompt, getCached, isResponseCacheEligible, setCached } from "../lib/cache"
 import { calcCost } from "../lib/pricing"
+import { DEFAULT_GATEWAY_RATE_LIMIT_RPM, GATEWAY_RATE_LIMIT_WINDOW_MS } from "../lib/rate-limit-config"
 import { countInputTokens } from "../lib/tokens"
 import { SSE_HEADERS } from "../lib/sse-headers"
 import { log } from "../lib/logger"
@@ -304,7 +305,7 @@ gateway.get("/models", requireApiKey(), async (c) => {
   })
 })
 
-gateway.post("/chat/completions", requireApiKey(), rateLimit(30, 60_000), async (c) => {
+gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RATE_LIMIT_RPM, GATEWAY_RATE_LIMIT_WINDOW_MS), async (c) => {
   const user = c.var.apiUser
   const reqId = c.get("requestId") ?? c.req.header("x-request-id") ?? `req-${Date.now()}`
   const ip =
@@ -1084,7 +1085,7 @@ gateway.get("/embedding-models", requireApiKey(), async (c) => {
   })
 })
 
-gateway.post("/embeddings", requireApiKey(), rateLimit(30, 60_000), async (c) => {
+gateway.post("/embeddings", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RATE_LIMIT_RPM, GATEWAY_RATE_LIMIT_WINDOW_MS), async (c) => {
   const body = await c.req.json().catch(() => null)
   
   if (!body || !body.input) {
