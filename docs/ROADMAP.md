@@ -42,7 +42,7 @@ Goal: nothing sensitive is exposed and nothing can be abused for free.
 - [ ] **P0.5** 🔴 Make the CI gitleaks step blocking (remove `continue-on-error`). Add a pre-commit hook (gitleaks or `detect-secrets`).
 - [ ] **P0.6** 🔴 Audit the Neon and provider dashboards for use of the leaked credentials (unknown IPs, unexpected spend).
 - [ ] **P0.7** 🟠 Add signup protection *immediately*: per-IP throttle, disable the welcome credit until email is verified (or temporarily set it to 0).
-- [ ] **P0.8** 🟠 Fix the misleading "$5 shown / $2 granted" welcome bonus (`WELCOME_DISPLAY_USD`). Show the real value.
+- [ ] **P0.8** 🟠 Fix the misleading welcome bonus display (`WELCOME_DISPLAY_USD`).
 
 **Exit criteria:** old credentials are dead, the repo is clean, and no anonymous path grants spendable credit.
 

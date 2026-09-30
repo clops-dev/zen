@@ -283,6 +283,14 @@ Seven starter combo templates are inserted by the migration.
 
 ## Known limitations, flagged not fixed
 
+> **Correction (context windows):** Per-model context-window enforcement is
+> active. The gateway estimates input tokens before routing, reserves output
+> headroom, reroutes to a model that fits when available, and otherwise
+> returns `413 context_length_exceeded` with the required and largest
+> available context windows. Every enabled production model must still have a
+> non-NULL, accurate `context_window`; unknown (`NULL`) values cannot be
+> safely enforced.
+
 - `providers.api_key` is stored in plaintext in Postgres. Fine for a
   single-operator setup — restrict DB grants or add pgcrypto column
   encryption before giving anyone else DB access.
@@ -302,11 +310,6 @@ Seven starter combo templates are inserted by the migration.
   the public internet.
 - The classifier is unsupervised heuristics, not measured against your real
   traffic yet — expect some misroutes until you tune the keyword list.
-- No per-model context-window enforcement yet — a very long conversation
-  could get routed to a model that can't hold it. Worth adding once you've
-  picked real models and know their context windows (register them via the
-  `context_window` field in Models — the field exists, just isn't checked
-  against message length yet).
 - Rate limiting is per-user, Postgres-backed, 30 req/min by default
   (`src/routes/gateway.ts`) — adjust if that's wrong for your traffic shape.
 

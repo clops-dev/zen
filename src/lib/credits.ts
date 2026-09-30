@@ -31,16 +31,10 @@ export const PACKAGE_STEP_DT = 5
 
 /**
  * Welcome bonus granted to every new user on signup.
- * Real value: $2 USD of AI usage (6 DT at 3 DT/$).
- * Displayed value in the UI: $5 (promotional — see WELCOME_DISPLAY_USD).
  */
-export const WELCOME_CREDITS_DT = 2 * DT_PER_USD // 6 DT = $2 real value
+export const WELCOME_CREDITS_DT = 1 * DT_PER_USD
 
-/**
- * The promotional dollar figure shown to users for their welcome bonus.
- * This is purely a display value — the actual credit granted is WELCOME_CREDITS_DT.
- */
-export const WELCOME_DISPLAY_USD = 5
+export const WELCOME_DISPLAY_USD = 1
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -449,8 +443,8 @@ export interface UserBillingSummary {
   input_tokens: number
   output_tokens: number
   total_tokens: number
-  /** Promotional display-only welcome bonus figure shown in the UI ($5). */
   welcome_display_usd: number
+  has_purchased_credits: boolean
 }
 
 export async function getUserBillingSummary(userId: string): Promise<UserBillingSummary> {
@@ -461,6 +455,13 @@ export async function getUserBillingSummary(userId: string): Promise<UserBilling
       AND type IN ('purchase', 'admin_grant', 'refund', 'adjustment')
       AND status = 'completed'
       AND amount_dt > 0
+  `)
+
+  const [purchaseRow] = await withDbResilience(() => sql`
+    SELECT EXISTS(
+      SELECT 1 FROM credit_transactions
+      WHERE user_id = ${userId} AND type = 'purchase' AND status = 'completed' AND amount_dt > 0
+    ) AS has_purchase
   `)
 
   const [usageRow] = await withDbResilience(() => sql`
@@ -496,6 +497,7 @@ export async function getUserBillingSummary(userId: string): Promise<UserBilling
     output_tokens,
     total_tokens,
     welcome_display_usd: WELCOME_DISPLAY_USD,
+    has_purchased_credits: Boolean(purchaseRow?.has_purchase),
   }
 }
 

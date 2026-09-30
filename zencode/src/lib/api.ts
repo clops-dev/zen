@@ -34,20 +34,7 @@ export interface UserProfile {
   credit_balance_dt: number;
   credit_balance_usd_value: number;
   has_credits: boolean;
-}
-
-export interface ApiKey {
-  id: string;
-  key_prefix: string;
-  label: string | null;
-  created_at: string;
-  last_used_at: string | null;
-  revoked: boolean;
-}
-
-export interface NewApiKeyResponse {
-  api_key: string;
-  prefix: string;
+  has_purchased_credits: boolean;
 }
 
 export interface MonthlyUsage {
@@ -170,27 +157,6 @@ export const api = {
     return apiFetch<UserProfile>('/user-api/me');
   },
 
-  /** List all API keys (including revoked ones). */
-  listApiKeys(): Promise<ApiKey[]> {
-    return apiFetch<ApiKey[]>('/user-api/api-keys');
-  },
-
-  /** Create a new API key. Returns the raw key exactly once. */
-  createApiKey(label?: string): Promise<NewApiKeyResponse> {
-    return apiFetch<NewApiKeyResponse>('/user-api/api-keys', {
-      method: 'POST',
-      body: JSON.stringify({ label: label ?? null }),
-    });
-  },
-
-  /** Revoke an API key by its database ID. */
-  revokeApiKey(id: string): Promise<{ ok: boolean }> {
-    return apiFetch<{ ok: boolean }>(`/user-api/api-keys/${id}/revoke`, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    });
-  },
-
   /** Monthly aggregate usage for the last 6 months. */
   getMonthlyUsage(): Promise<MonthlyUsage[]> {
     return apiFetch<MonthlyUsage[]>('/user-api/usage');
@@ -212,7 +178,7 @@ export const api = {
   },
 
   /**
-   * Purchase a credit package instantly ($5 = 15 DT, $10 = 30 DT, etc.)
+   * Purchase a credit package.
    * Returns confirmation receipt and updated user billing state.
    */
   purchaseCredits(amount_dt: number): Promise<PurchaseResponse> {

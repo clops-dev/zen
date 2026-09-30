@@ -1,7 +1,6 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { DashboardLayout } from '@/layouts/DashboardLayout';
 import { DashboardPage } from '@/pages/DashboardPage';
-import { ApiKeysPage } from '@/pages/ApiKeysPage';
 import { ModelsPage } from '@/pages/ModelsPage';
 import { UsagePage } from '@/pages/UsagePage';
 import { CliPage } from '@/pages/CliPage';
@@ -55,7 +54,7 @@ export const App = () => {
       >
         <Route index element={<Navigate to="dashboard" replace />} />
         <Route path="dashboard" element={<DashboardPage />} />
-        <Route path="api-keys" element={<ApiKeysPage />} />
+        <Route path="api-keys" element={<Navigate to="/app/dashboard" replace />} />
         <Route path="models" element={<ModelsPage />} />
         <Route path="usage" element={<UsagePage />} />
         <Route path="cli" element={<CliPage />} />

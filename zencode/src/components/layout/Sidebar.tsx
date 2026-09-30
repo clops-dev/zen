@@ -1,7 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard,
-  Key,
   Activity,
   Coins,
   Settings,
@@ -19,7 +18,6 @@ interface SidebarProps {
 
 const navItems = [
   { to: '/app/dashboard',  icon: LayoutDashboard, label: 'Dashboard', glyph: '▣' },
-  { to: '/app/api-keys',   icon: Key,             label: 'API Keys',  glyph: '◇' },
   { to: '/app/usage',      icon: Activity,        label: 'Usage',     glyph: '▤' },
   { to: '/app/credits',    icon: Coins,           label: 'Credits',   glyph: '◎' },
   { to: '/app/settings',   icon: Settings,        label: 'Settings',  glyph: '⚙' },

@@ -35,7 +35,6 @@ auth.post("/signup", async (c) => {
     ON CONFLICT (user_id) DO NOTHING
   `)
 
-  // Grant welcome bonus — real $2 value (WELCOME_CREDITS_DT DT), displayed as $5.
   await addCredits(newUser.id, WELCOME_CREDITS_DT, "admin_grant", "completed", {
     adminNote: `Welcome bonus: ${WELCOME_CREDITS_DT} DT granted on signup (displays as $${WELCOME_DISPLAY_USD} to user)`,
   })

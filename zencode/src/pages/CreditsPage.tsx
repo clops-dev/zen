@@ -83,7 +83,7 @@ export const CreditsPage = () => {
         </div>
         <h1 className="text-2xl font-bold tracking-tight">BUY AI CREDITS</h1>
         <p className="text-sm text-fg-muted mt-1">
-          Credits-only payment system. Fixed rate: <strong>1 USD = 3 DT</strong> ($5 = 15 DT).
+          Credits-only payment system. Fixed rate: <strong>1 USD = 3 DT</strong>.
         </p>
       </div>
 

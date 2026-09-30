@@ -92,8 +92,8 @@ userApi.get("/me", async (c) => {
     credit_balance_dt: billing.remaining_credits_dt,
     credit_balance_usd_value: billing.remaining_credits,
     has_credits: billing.remaining_credits > 0,
-    // Promotional display value for the welcome bonus
     welcome_display_usd: billing.welcome_display_usd,
+    has_purchased_credits: billing.has_purchased_credits,
   })
 })
 
