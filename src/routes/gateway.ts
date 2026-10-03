@@ -22,6 +22,7 @@ import { hashPrompt, getCached, isResponseCacheEligible, setCached } from "../li
 import { calcCost } from "../lib/pricing"
 import { DEFAULT_GATEWAY_RATE_LIMIT_RPM, GATEWAY_RATE_LIMIT_WINDOW_MS } from "../lib/rate-limit-config"
 import { countInputTokens } from "../lib/tokens"
+import { resolveBilledInputTokens } from "../lib/billing-tokens"
 import { SSE_HEADERS } from "../lib/sse-headers"
 import { log } from "../lib/logger"
 import { recordRequestMetrics, recordStageMs } from "../lib/metrics"
@@ -188,9 +189,9 @@ async function recordRequest(fields: {
   rejectReason?: string
   fromCache?: boolean
   requestId?: string
-}) {
+}): Promise<string | null> {
   try {
-    await withDbResilience(() => sql`
+    const [row] = await withDbResilience(() => sql<{ id: string }[]>`
       INSERT INTO ai_requests (
         user_id, ip, model_label, prompt_hash, input_tokens, output_tokens,
         cost_usd, latency_ms, status, reject_reason, from_cache, request_id
@@ -200,9 +201,12 @@ async function recordRequest(fields: {
         ${fields.latencyMs ?? null}, ${fields.status}, ${fields.rejectReason ?? null}, ${fields.fromCache ?? false},
         ${fields.requestId ?? null}
       )
+      RETURNING id
     `)
+    return row?.id ?? null
   } catch (err) {
     console.error("[gateway] failed to log request:", err)
+    return null
   }
 }
 
@@ -501,10 +505,11 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
         try {
           const result = await callNonStreaming(target, messages as any, maxOutputTokens, temperature, tools, tool_choice, remainingMs)
           const latencyMs = Date.now() - started
+          const billedInputTokens = resolveBilledInputTokens(result.inputTokens, requirements.requiredTokens)
           const cost = calcCost({
             inputPricePer1M: target.inputPricePer1M,
             outputPricePer1M: target.outputPricePer1M,
-            inputTokens: result.inputTokens,
+            inputTokens: billedInputTokens,
             outputTokens: result.outputTokens,
             inputCacheReadPricePer1M: target.inputCacheReadPricePer1M,
             inputCacheWritePricePer1M: target.inputCacheWritePricePer1M,
@@ -513,17 +518,15 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
           })
 
           bg(reportRouteOutcome(target.providerId, true, target.modelRowId))
-          bg(recordUsage(user.id, result.inputTokens, result.outputTokens, cost))
           bg((async () => {
-            await recordRequest({
+            const aiRequestId = await recordRequest({
               userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
-              inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
+              inputTokens: billedInputTokens, outputTokens: result.outputTokens, costUsd: cost,
               latencyMs, status: "success", requestId: reqId,
             })
-            // Deduct from credit balance if cost > 0.
             if (cost > 0) {
               try {
-                await deductCredits(user.id, usdToDt(cost), reqId)
+                await deductCredits(user.id, usdToDt(cost), aiRequestId ?? undefined)
               } catch (err) {
                 if (err instanceof InsufficientCreditsError) {
                   console.warn(`[gateway] credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)
@@ -830,10 +833,11 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
         try {
           const result = await done
           const latencyMs = Date.now() - started
+          const billedInputTokens = resolveBilledInputTokens(result.inputTokens, requirements.requiredTokens)
           const cost = calcCost({
             inputPricePer1M: target.inputPricePer1M,
             outputPricePer1M: target.outputPricePer1M,
-            inputTokens: result.inputTokens,
+            inputTokens: billedInputTokens,
             outputTokens: result.outputTokens,
             inputCacheReadPricePer1M: target.inputCacheReadPricePer1M,
             inputCacheWritePricePer1M: target.inputCacheWritePricePer1M,
@@ -841,16 +845,15 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
             cachedTokens: (result as any).cachedTokens ?? 0,
           })
           await reportRouteOutcome(target.providerId, true, target.modelRowId)
-          await recordUsage(user.id, result.inputTokens, result.outputTokens, cost)
-          await recordRequest({
+          const aiRequestId = await recordRequest({
             userId: user.id, ip, modelLabel: target.label, promptHash: cacheKey,
-            inputTokens: result.inputTokens, outputTokens: result.outputTokens, costUsd: cost,
+            inputTokens: billedInputTokens, outputTokens: result.outputTokens, costUsd: cost,
             latencyMs, status: "success", requestId: reqId,
           })
-          // Deduct from credit balance if cost > 0.
           if (cost > 0) {
             try {
-              await deductCredits(user.id, usdToDt(cost), reqId)
+              await deductCredits(user.id, usdToDt(cost), aiRequestId ?? undefined)
+              await recordUsage(user.id, billedInputTokens, result.outputTokens, cost)
             } catch (err) {
               if (err instanceof InsufficientCreditsError) {
                 console.warn(`[gateway] stream credit deduction failed (insufficient): userId=${user.id} required=${err.required}dt balance=${err.balance}dt`)

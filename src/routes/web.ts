@@ -8,6 +8,7 @@ import { layoutHtml, escape } from "../lib/html"
 import { generateApiKey } from "../lib/apikeys"
 import { env } from "../lib/env"
 import { approveDeviceCode } from "./device-auth"
+import { addCredits, WELCOME_CREDITS_DT, WELCOME_DISPLAY_USD } from "../lib/credits"
 export const web = new Hono()
 
 // ---------------------------------------------------------------------------
@@ -57,7 +58,7 @@ web.get("/signup", async (c) => {
     <div class="center-card">
       <div class="brandmark"><span class="mark">z</span>zen-gateway</div>
       <h1>Create account</h1>
-      <p class="lead">Free tier includes a 50,000 token monthly budget.</p>
+       <p class="lead">New accounts include $0.50 in AI credits.</p>
       <form method="POST" action="/signup">
         <input type="email" name="email" placeholder="email" required autocomplete="email">
         <input type="password" name="password" placeholder="password (min 8 chars)" required minlength="8" autocomplete="new-password">
@@ -85,6 +86,9 @@ web.post("/signup", async (c) => {
     INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly)
     VALUES (${newUser.id}, 'free', 'active', ${env.DEFAULT_FREE_TOKEN_BUDGET})
   `
+  await addCredits(newUser.id, WELCOME_CREDITS_DT, "admin_grant", "completed", {
+    adminNote: `Welcome bonus: ${WELCOME_CREDITS_DT} DT granted on signup (displays as $${WELCOME_DISPLAY_USD} to user)`,
+  })
 
   const session = issueSession(newUser.id, "user")
   setCookie(c, SESSION_COOKIE, session.token, SESSION_COOKIE_OPTIONS)

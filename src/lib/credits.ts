@@ -1,7 +1,7 @@
 /**
  * src/lib/credits.ts — Prepaid DT-credit accounting.
  *
- * Rate: $1 USD of AI tokens = 4 DT  →  1 DT = $0.25 AI usage value.
+ * Rate: $1 USD of AI tokens = 3 DT  →  1 DT = $0.3333 AI usage value.
  *
  * Design rules:
  *  - All mutations use serializable transactions so concurrent requests
@@ -40,9 +40,9 @@ export const CREDIT_PACKAGES = [
 /**
   * Welcome bonus granted to every new user on signup.
  */
-export const WELCOME_CREDITS_DT = 1 * DT_PER_USD
+export const WELCOME_CREDITS_DT = 0.5 * DT_PER_USD
 
-export const WELCOME_DISPLAY_USD = 1
+export const WELCOME_DISPLAY_USD = 0.5
 
 // ---------------------------------------------------------------------------
 // Errors
