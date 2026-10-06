@@ -52,13 +52,7 @@ export const userApi = new Hono()
 // Apply CSRF protection
 userApi.use("*", csrfProtection())
 
-function getClientIp(c: Context): string {
-  return (
-    c.req.header("cf-connecting-ip") ??
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
-    "127.0.0.1"
-  )
-}
+import { getClientIp } from "../lib/client-ip"
 
 function getRequestId(c: Context): string {
   return c.get("requestId") ?? c.req.header("x-request-id") ?? `req-${Date.now()}`

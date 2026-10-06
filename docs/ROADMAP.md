@@ -166,7 +166,7 @@ Today's hot path does ≥ 7 sequential DB round-trips before dispatch: API-key l
 
 ### 5B. Abuse resistance
 - [x] **P5.7** 🔴 Signup: email verification, lowercase/normalize emails, disposable-domain blocklist, per-IP throttle, CAPTCHA (Turnstile), and consider granting free credit only after verification or via Google OAuth.
-- [ ] **P5.8** 🟠 Rate limits keyed **per user / API key**, not per (user, IP). Trust `X-Forwarded-For` only from your proxy: strip client-supplied values in HAProxy (`http-request del-header X-Forwarded-For`) and set it from `src`.
+- [x] **P5.8** 🟠 Rate limits keyed **per user / API key**, not per (user, IP). Trust `X-Forwarded-For` only from your proxy: strip client-supplied values in HAProxy (`http-request del-header X-Forwarded-For`) and set it from `src`.
 - [ ] **P5.9** 🟠 Limit **concurrent streams per user** and tokens per minute, not just requests per minute, and raise the request limit for legitimate agent loops (30/min is too low).
 - [x] **P5.10** 🟠 Login throttling and lockout; use a dummy hash for unknown emails so response time doesn't reveal accounts. Make the signup response non-enumerating.
 - [x] **P5.11** 🟡 Wrap user + credits creation in **one transaction** and rely on a unique index on `lower(email)` to close the check-then-insert race.

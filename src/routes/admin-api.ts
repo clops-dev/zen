@@ -29,13 +29,12 @@ adminApi.use("*", csrfProtection())
 
 adminApi.get("/credit-packages", (c) => c.json({ packages: CREDIT_PACKAGES, dt_per_usd: DT_PER_USD }))
 
+import { getClientIp } from "../lib/client-ip"
+
 const jsonError = (c: any, status: number, code: string, message?: string) =>
   c.json({ error: code, message: message ?? code }, status)
 
-const ip = (c: any) =>
-  c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
-  c.req.header("x-real-ip") ??
-  null
+const ip = (c: any) => getClientIp(c)
 
 const requireColumn = async (table: string, column: string): Promise<boolean> => {
   const r = await sql<{ exists: boolean }[]>`

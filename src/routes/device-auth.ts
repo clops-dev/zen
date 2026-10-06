@@ -31,37 +31,18 @@ import {
   constantTimeEqual,
 } from "../lib/device-code"
 
+import { getClientIp } from "../lib/client-ip"
+import { checkKeyRateLimit } from "../middleware/rate-limit"
+import { checkAuthRateLimit } from "../lib/auth-rate-limit"
+
 export const deviceAuth = new Hono()
 
 export const DEVICE_CODE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 export const DEFAULT_POLL_INTERVAL_SECONDS = 5
 export const MAX_PENDING_PER_IP = 5
 export const MAX_FAILED_ATTEMPTS = 5
-
-// In-memory rate limiting for polling by IP
-const pollIpHits = new Map<string, { count: number; windowStart: number }>()
-const POLL_RATE_LIMIT_MAX = 60 // max polls per minute per IP
-const POLL_RATE_LIMIT_WINDOW_MS = 60 * 1000
-
-function isPollRateLimited(ip: string): boolean {
-  const now = Date.now()
-  const current = pollIpHits.get(ip)
-  if (!current || now - current.windowStart > POLL_RATE_LIMIT_WINDOW_MS) {
-    pollIpHits.set(ip, { count: 1, windowStart: now })
-    return false
-  }
-  current.count++
-  return current.count > POLL_RATE_LIMIT_MAX
-}
-
-export function getClientIp(c: Context): string {
-  return (
-    c.req.header("cf-connecting-ip") ||
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-    c.req.header("x-real-ip") ||
-    "127.0.0.1"
-  )
-}
+export const POLL_RATE_LIMIT_MAX = 60 // max polls per minute per IP
+export const POLL_RATE_LIMIT_WINDOW_MS = 60 * 1000
 
 function webBaseUrl(requestUrl: string): string {
   if (process.env.WEB_URL) return process.env.WEB_URL.replace(/\/$/, "")
@@ -84,6 +65,16 @@ export async function cleanupExpiredRequests(): Promise<void> {
 deviceAuth.post("/device/start", async (c) => {
   const clientIp = getClientIp(c)
   const userAgent = c.req.header("user-agent") ?? "unknown"
+
+  const rl = await checkAuthRateLimit("device_start", "ip", clientIp, false)
+  if (!rl.allowed) {
+    const retrySec = Math.max(1, Math.ceil((rl.retryAfterMs ?? 1000) / 1000))
+    c.header("Retry-After", String(retrySec))
+    return c.json(
+      { error: "too_many_requests", message: "Too many device authorization requests from this IP.", retry_after: retrySec },
+      429,
+    )
+  }
 
   // Clean up stale rows opportunistically
   cleanupExpiredRequests()
@@ -139,8 +130,11 @@ const pollHandler = async (c: Context) => {
   const clientIp = getClientIp(c)
 
   // Enforce IP rate limiting
-  if (isPollRateLimited(clientIp)) {
-    return c.json({ error: "rate_limit_exceeded", message: "Too many polling requests." }, 429)
+  const pollDecision = await checkKeyRateLimit(`device_poll:${clientIp}`, POLL_RATE_LIMIT_MAX, POLL_RATE_LIMIT_WINDOW_MS)
+  if (!pollDecision.allowed) {
+    const retrySec = Math.max(1, Math.ceil((pollDecision.resetAt - Date.now()) / 1000))
+    c.header("Retry-After", String(retrySec))
+    return c.json({ error: "rate_limit_exceeded", message: "Too many polling requests.", retry_after: retrySec }, 429)
   }
 
   // Accept device_code from query param or JSON body

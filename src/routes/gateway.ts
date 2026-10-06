@@ -2,7 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import { sql, withDbResilience } from "../lib/db"
 import { requireApiKey } from "../middleware/api-key"
-import { rateLimit } from "../middleware/rate-limit"
+import { rateLimit, acquireStreamSlot, releaseStreamSlot } from "../middleware/rate-limit"
 import { classifyComplexity, isAgentRequest } from "../lib/complexity"
 import { env } from "../lib/env"
 import {
@@ -27,6 +27,7 @@ import { SSE_HEADERS } from "../lib/sse-headers"
 import { log } from "../lib/logger"
 import { recordRequestMetrics, recordStageMs } from "../lib/metrics"
 import { getActiveUser } from "../lib/active-user"
+import { getClientIp } from "../lib/client-ip"
 
 export const gateway = new Hono()
 
@@ -323,10 +324,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
     }, 403)
   }
   const reqId = c.get("requestId") ?? c.req.header("x-request-id") ?? `req-${Date.now()}`
-  const ip =
-    c.req.header("cf-connecting-ip") ??
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
-    "unknown"
+  const ip = getClientIp(c)
 
   const body = await c.req.json().catch(() => null)
   const parsed = chatCompletionsSchema.safeParse(body)
@@ -754,6 +752,31 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
   }
 
   // ---- streaming: peek each candidate for real output before committing to the client ----
+  let streamSlotId: string | undefined
+  if (stream) {
+    const slot = await acquireStreamSlot(user.id)
+    if (!slot.acquired) {
+      bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: "concurrency_limit_exceeded", requestId: reqId }))
+      const errorBody = {
+        error: {
+          message: "Too many concurrent streaming requests. Please wait for an existing stream to complete.",
+          type: "rate_limit_exceeded",
+          code: "concurrency_limit_exceeded",
+          retry_after: 1,
+        },
+      }
+      const sseBody = `data: ${JSON.stringify(errorBody)}\n\ndata: [DONE]\n\n`
+      return new Response(sseBody, {
+        status: 429,
+        headers: {
+          ...SSE_HEADERS,
+          "Retry-After": "1",
+        },
+      })
+    }
+    streamSlotId = slot.slotId
+  }
+
   let committedTarget: RouteTarget | null = null
   let committedStream: ReadableStream | null = null
   let isSwitchedStream = false
@@ -993,6 +1016,41 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
   }
 
   if (committedStream && committedTarget) {
+    if (streamSlotId) {
+      const slotIdToRelease = streamSlotId
+      let released = false
+      const releaseOnce = () => {
+        if (!released) {
+          released = true
+          releaseStreamSlot(user.id, slotIdToRelease).catch(() => {})
+        }
+      }
+      const originalStream = committedStream
+      committedStream = new ReadableStream({
+        async start(controller) {
+          const reader = originalStream.getReader()
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) {
+                releaseOnce()
+                controller.close()
+                break
+              }
+              controller.enqueue(value)
+            }
+          } catch (err) {
+            releaseOnce()
+            controller.error(err)
+          }
+        },
+        cancel(reason) {
+          releaseOnce()
+          return originalStream.cancel(reason)
+        },
+      })
+    }
+
     const headers: Record<string, string> = {
       ...SSE_HEADERS,
       "x-zen-model": committedTarget.label,
@@ -1006,6 +1064,10 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
       status: 200,
       headers,
     })
+  }
+
+  if (streamSlotId && !committedStream) {
+    releaseStreamSlot(user.id, streamSlotId).catch(() => {})
   }
 
   const streamElapsed = Date.now() - started

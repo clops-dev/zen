@@ -40,6 +40,7 @@ import {
   canonicalEmailAlreadyGranted,
   recordWelcomeGrant,
 } from "../lib/auth-rate-limit"
+import { getClientIp } from "../lib/client-ip"
 
 export const googleAuth = new Hono()
 
@@ -352,7 +353,7 @@ googleAuth.get("/google/callback", async (c) => {
         // Welcome grant: check per-IP and canonical-email dedup
         // Google signups are only granted when email_verified = true (already verified above)
         const canonical = canonicalEmail(email)
-        const clientIp = c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown"
+        const clientIp = getClientIp(c)
         const grantOk = await canGrantWelcomeCredit(clientIp)
         const canonicalDup = await canonicalEmailAlreadyGranted(canonical)
 

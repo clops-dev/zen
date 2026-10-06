@@ -2,6 +2,8 @@ import type { MiddlewareHandler } from "hono"
 import { randomBytes } from "node:crypto"
 import { log } from "../lib/logger"
 
+import { getClientIp } from "../lib/client-ip"
+
 declare module "hono" {
   interface ContextVariableMap {
     requestId: string
@@ -32,10 +34,7 @@ export const requestId = (): MiddlewareHandler => async (c, next) => {
   c.set("requestStartedAt", Date.now())
   c.header("X-Request-Id", id)
 
-  const ip =
-    c.req.header("cf-connecting-ip") ??
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
-    "unknown"
+  const ip = getClientIp(c)
   log.info("http_request", {
     request_id: id,
     method: c.req.method,

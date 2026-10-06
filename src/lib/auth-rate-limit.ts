@@ -158,9 +158,9 @@ export async function checkAuthRateLimit(
 
     return { allowed: true, attemptsRemaining: Math.max(0, lockoutAfter - newCount) }
   } catch (err) {
-    // Fail open: if DB is down, allow the request but log
-    console.error("[auth-rate-limit] DB error, failing open:", err)
-    return { allowed: true }
+    // Fail closed: never fail open on limiter errors for auth endpoints
+    console.error("[auth-rate-limit] DB error, failing closed:", err)
+    return { allowed: false, retryAfterMs: 30_000 }
   }
 }
 
@@ -200,7 +200,7 @@ export async function canGrantWelcomeCredit(ip: string): Promise<boolean> {
     const cnt = Number(rows[0]?.cnt ?? 0)
     return cnt < maxGrants
   } catch {
-    return true // fail open
+    return false // fail closed
   }
 }
 
