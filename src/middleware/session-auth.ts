@@ -1,6 +1,5 @@
 import type { MiddlewareHandler } from "hono"
-import { getCookie } from "hono/cookie"
-import { SESSION_COOKIE, verifySession } from "../lib/session"
+import { getSessionToken, verifySession } from "../lib/session"
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -10,8 +9,8 @@ declare module "hono" {
 
 /** Any logged-in user (dashboard). Redirects to /login if not authenticated. */
 export const requireSession = (): MiddlewareHandler => async (c, next) => {
-  const token = getCookie(c, SESSION_COOKIE)
-  const session = verifySession(token)
+  const token = getSessionToken(c)
+  const session = await verifySession(token)
   const isApi = c.req.path.startsWith("/user-api") || c.req.path.startsWith("/admin-api") || c.req.path.startsWith("/api") || c.req.header("accept")?.includes("application/json")
   if (!session) {
     if (isApi) return c.json({ error: "unauthorized", message: "Authentication required" }, 401)
@@ -23,8 +22,8 @@ export const requireSession = (): MiddlewareHandler => async (c, next) => {
 
 /** Admin-only pages. Redirects to /login if not authenticated, 403s if logged in but not admin. */
 export const requireAdmin = (): MiddlewareHandler => async (c, next) => {
-  const token = getCookie(c, SESSION_COOKIE)
-  const session = verifySession(token)
+  const token = getSessionToken(c)
+  const session = await verifySession(token)
   const isApi = c.req.path.startsWith("/admin-api") || c.req.path.startsWith("/api") || c.req.header("accept")?.includes("application/json")
   if (!session) {
     if (isApi) return c.json({ error: "unauthorized", message: "Authentication required" }, 401)

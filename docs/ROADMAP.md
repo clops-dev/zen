@@ -165,16 +165,16 @@ Today's hot path does ≥ 7 sequential DB round-trips before dispatch: API-key l
 - [ ] **P5.6** 🟡 Add per-user monthly/daily spend caps and an admin alert on anomalies.
 
 ### 5B. Abuse resistance
-- [ ] **P5.7** 🔴 Signup: email verification, lowercase/normalize emails, disposable-domain blocklist, per-IP throttle, CAPTCHA (Turnstile), and consider granting free credit only after verification or via Google OAuth.
+- [x] **P5.7** 🔴 Signup: email verification, lowercase/normalize emails, disposable-domain blocklist, per-IP throttle, CAPTCHA (Turnstile), and consider granting free credit only after verification or via Google OAuth.
 - [ ] **P5.8** 🟠 Rate limits keyed **per user / API key**, not per (user, IP). Trust `X-Forwarded-For` only from your proxy: strip client-supplied values in HAProxy (`http-request del-header X-Forwarded-For`) and set it from `src`.
 - [ ] **P5.9** 🟠 Limit **concurrent streams per user** and tokens per minute, not just requests per minute, and raise the request limit for legitimate agent loops (30/min is too low).
-- [ ] **P5.10** 🟠 Login throttling and lockout; use a dummy hash for unknown emails so response time doesn't reveal accounts. Make the signup response non-enumerating.
-- [ ] **P5.11** 🟡 Wrap user + credits creation in **one transaction** and rely on a unique index on `lower(email)` to close the check-then-insert race.
+- [x] **P5.10** 🟠 Login throttling and lockout; use a dummy hash for unknown emails so response time doesn't reveal accounts. Make the signup response non-enumerating.
+- [x] **P5.11** 🟡 Wrap user + credits creation in **one transaction** and rely on a unique index on `lower(email)` to close the check-then-insert race.
 
 ### 5C. Sessions & secrets
-- [ ] **P5.12** 🟠 Session versioning (`token_version` on the user) so demotion, deletion and password change revoke sessions. Read the role from the DB (short cache) rather than trusting the cookie for 30 days.
+- [x] **P5.12** 🟠 Session versioning (`token_version` on the user) so demotion, deletion and password change revoke sessions. Read the role from the DB (short cache) rather than trusting the cookie for 30 days.
 - [ ] **P5.13** 🟠 **Encrypt provider API keys at rest** (AES-GCM with a master key from the environment or a KMS, with a key id for rotation).
-- [ ] **P5.14** 🟡 Add CSRF protection for cookie-authenticated mutating admin endpoints (custom header or double-submit token), even with `SameSite=Lax`.
+- [x] **P5.14** 🟡 Add CSRF protection for cookie-authenticated mutating admin endpoints (custom header or double-submit token), even with `SameSite=Lax`.
 - [ ] **P5.15** 🟡 Tighten static file serving (`startsWith(dir + path.sep)`) and add security headers (CSP, HSTS, `X-Content-Type-Options`).
 
 **Exit criteria:** M10 = 0, and a scripted signup-farming attempt fails.

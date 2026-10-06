@@ -3,7 +3,17 @@ import { setCookie, deleteCookie, getCookie } from "hono/cookie"
 import { randomBytes } from "node:crypto"
 import { sql } from "../lib/db"
 import { hashPassword, verifyPassword } from "../lib/password"
-import { issueSession, verifySession, SESSION_COOKIE, SESSION_COOKIE_OPTIONS } from "../lib/session"
+import {
+  issueSession,
+  verifySession,
+  getSessionToken,
+  setSessionCookie,
+  clearSessionCookie,
+  revokeSession,
+  SESSION_COOKIE,
+  SESSION_COOKIE_OPTIONS,
+} from "../lib/session"
+import { getActiveUser } from "../lib/active-user"
 import { requireSession } from "../middleware/session-auth"
 import { layoutHtml, escape } from "../lib/html"
 import { generateApiKey } from "../lib/apikeys"
@@ -49,18 +59,23 @@ web.post("/login", async (c) => {
   const user = rows[0] as { id: string; password_hash: string; role: "user" | "admin" }
   const ok = await verifyPassword(password, user.password_hash)
   if (!ok) return c.redirect("/login?error=invalid+credentials", 303)
-  const [sub] = await sql`SELECT status FROM subscriptions WHERE user_id = ${user.id}`
-  if (sub?.status === "suspended") return c.redirect("/login?error=account+suspended", 303)
+  const activeUser = await getActiveUser(user.id)
+  if (!activeUser) return c.redirect("/login?error=account+suspended", 303)
 
-  const session = issueSession(user.id, user.role)
-  setCookie(c, SESSION_COOKIE, session.token, SESSION_COOKIE_OPTIONS)
+  const existingToken = getSessionToken(c)
+  if (existingToken) {
+    await revokeSession(existingToken)
+  }
+
+  const session = await issueSession(user.id, activeUser.role)
+  setSessionCookie(c, session.token, activeUser.role)
 
   const redirectTarget = c.req.query("redirect")
   if (redirectTarget && redirectTarget.startsWith("/")) {
     return c.redirect(redirectTarget, 303)
   }
 
-  return c.redirect(user.role === "admin" ? "/admin2" : "/dashboard", 303)
+  return c.redirect(activeUser.role === "admin" ? "/admin2" : "/dashboard", 303)
 })
 
 web.get("/signup", async (c) => {
@@ -101,13 +116,17 @@ web.post("/signup", async (c) => {
     adminNote: `Welcome bonus: ${WELCOME_CREDITS_DT} DT granted on signup (displays as $${WELCOME_DISPLAY_USD} to user)`,
   })
 
-  const session = issueSession(newUser.id, "user")
-  setCookie(c, SESSION_COOKIE, session.token, SESSION_COOKIE_OPTIONS)
+  const session = await issueSession(newUser.id, "user")
+  setSessionCookie(c, session.token, "user")
   return c.redirect("/dashboard", 303)
 })
 
 web.post("/logout", async (c) => {
-  deleteCookie(c, SESSION_COOKIE, { path: "/" })
+  const token = getSessionToken(c)
+  if (token) {
+    await revokeSession(token)
+  }
+  clearSessionCookie(c)
   return c.redirect("/login", 303)
 })
 
@@ -221,8 +240,8 @@ web.post("/dashboard/api-keys/:id/revoke", requireSession(), async (c) => {
 // ---------------------------------------------------------------------------
 
 web.get("/device", async (c) => {
-  const token = getCookie(c, SESSION_COOKIE)
-  const session = token ? verifySession(token) : null
+  const token = getSessionToken(c)
+  const session = token ? await verifySession(token) : null
   const rawCode = (c.req.query("user_code") || c.req.query("code") || "").trim()
 
   // Requirement 6: Bind approval to the logged-in user session; reject if no session
@@ -232,8 +251,8 @@ web.get("/device", async (c) => {
   }
 
   // Account suspension check
-  const [sub] = await sql`SELECT status FROM subscriptions WHERE user_id = ${session.userId}`
-  if (sub?.status === "suspended") {
+  const activeUser = await getActiveUser(session.userId)
+  if (!activeUser) {
     return c.html(
       layoutHtml(
         "suspended",
@@ -339,8 +358,8 @@ web.post("/device", async (c) => {
 })
 
 web.post("/device/approve", async (c) => {
-  const token = getCookie(c, SESSION_COOKIE)
-  const session = token ? verifySession(token) : null
+  const token = getSessionToken(c)
+  const session = token ? await verifySession(token) : null
   if (!session) {
     return c.redirect("/login?error=authentication_required", 303)
   }
@@ -362,8 +381,8 @@ web.post("/device/approve", async (c) => {
   }
   setCookie(c, "zen_device_csrf", "", { path: "/", maxAge: 0 })
 
-  const [sub] = await sql`SELECT status FROM subscriptions WHERE user_id = ${session.userId}`
-  if (sub?.status === "suspended") {
+  const activeUser = await getActiveUser(session.userId)
+  if (!activeUser) {
     return c.html(
       layoutHtml(
         "suspended",

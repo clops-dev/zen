@@ -23,6 +23,7 @@ import { Hono, type Context } from "hono"
 import { randomBytes } from "node:crypto"
 import { sql } from "../lib/db"
 import { generateApiKey } from "../lib/apikeys"
+import { getActiveUser } from "../lib/active-user"
 import {
   generateUserCode,
   formatUserCode,
@@ -239,7 +240,10 @@ const pollHandler = async (c: Context) => {
     }
 
     const userId = updated[0].user_id
-    const [userRow] = await sql`SELECT email FROM users WHERE id = ${userId}`
+    const activeUser = await getActiveUser(userId)
+    if (!activeUser) {
+      return c.json({ error: "account_suspended", message: "Account is suspended" }, 403)
+    }
 
     // Mint long-lived API key at the moment of successful poll
     const { raw, hash, prefix } = generateApiKey()
@@ -251,7 +255,7 @@ const pollHandler = async (c: Context) => {
     return c.json({
       status: "approved",
       api_key: raw,
-      email: userRow?.email ?? undefined,
+      email: activeUser.email,
     })
   }
 

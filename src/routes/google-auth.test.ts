@@ -6,6 +6,7 @@ import { setSql, resetSql } from "../lib/db"
 import { issueSession, SESSION_COOKIE, verifySession } from "../lib/session"
 import { env } from "../lib/env"
 import { clearJwksCache, type GoogleJwk } from "../lib/google-token"
+import { invalidateActiveUserCache } from "../lib/active-user"
 
 describe("Google OAuth Flow Security & Attack Tests", () => {
   let publicKeyJwk: GoogleJwk
@@ -62,6 +63,32 @@ describe("Google OAuth Flow Security & Attack Tests", () => {
       const uid = values[0]
       const found = subscriptions.filter((s) => s.user_id === uid)
       return found.map((s) => ({ status: s.status, tier: s.tier }))
+    }
+
+    // 3.5 SELECT ... FROM users u WHERE u.id = ? (getActiveUser)
+    if (query.includes("from users") && query.includes("u.id = ?")) {
+      const uid = values[0]
+      const u = users.find((x) => x.id === uid)
+      if (!u) return []
+      const s = subscriptions.find((x) => x.user_id === uid)
+      return [
+        {
+          id: u.id,
+          email: u.email,
+          role: u.role,
+          user_status: "active",
+          sub_status: s ? s.status : "active",
+        },
+      ]
+    }
+
+    if (query.includes("insert into sessions")) {
+      return [{ id: `sess-${Date.now()}` }]
+    }
+
+    if (query.includes("from sessions")) {
+      const u = users[0]
+      return [{ id: "sess-1", user_id: u ? u.id : "user-test", last_seen_at: new Date(), expires_at: new Date(Date.now() + 100000), revoked: false }]
     }
 
     // 4. INSERT INTO users (email, google_id, avatar_url, role) VALUES (...) RETURNING id
@@ -188,6 +215,7 @@ describe("Google OAuth Flow Security & Attack Tests", () => {
     subscriptions = []
     credits = []
     clearJwksCache()
+    invalidateActiveUserCache()
     fetchMockHandler = null
   })
 

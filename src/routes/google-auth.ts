@@ -27,13 +27,19 @@ import { Hono, type Context } from "hono"
 import { setCookie, getCookie } from "hono/cookie"
 import { randomBytes, createHash } from "node:crypto"
 import { sql } from "../lib/db"
-import { issueSession, verifySession, SESSION_COOKIE, SESSION_COOKIE_OPTIONS } from "../lib/session"
+import { issueSession, verifySession, SESSION_COOKIE, SESSION_COOKIE_OPTIONS, getSessionToken, setSessionCookie } from "../lib/session"
+import { getActiveUser } from "../lib/active-user"
 import { env } from "../lib/env"
 import { log } from "../lib/logger"
 import { approveDeviceCode } from "./device-auth"
 import { addCredits, WELCOME_CREDITS_DT, WELCOME_DISPLAY_USD } from "../lib/credits"
-import { normalizeEmail } from "../lib/email"
+import { normalizeEmail, canonicalEmail } from "../lib/email"
 import { verifyGoogleIdToken, type GoogleIdTokenClaims } from "../lib/google-token"
+import {
+  canGrantWelcomeCredit,
+  canonicalEmailAlreadyGranted,
+  recordWelcomeGrant,
+} from "../lib/auth-rate-limit"
 
 export const googleAuth = new Hono()
 
@@ -91,8 +97,8 @@ googleAuth.get("/google", async (c) => {
   const deviceCode = c.req.query("device_code") ?? ""
 
   // Check if an existing logged-in user is initiating the flow (explicit link).
-  const currentSessionToken = getCookie(c, SESSION_COOKIE)
-  const currentSession = currentSessionToken ? verifySession(currentSessionToken) : null
+  const currentSessionToken = getSessionToken(c)
+  const currentSession = currentSessionToken ? await verifySession(currentSessionToken) : null
 
   // PKCE: generate random verifier and its SHA-256 challenge.
   const verifier = b64url(randomBytes(48))
@@ -275,8 +281,8 @@ googleAuth.get("/google/callback", async (c) => {
       userRole = existingByGoogle[0].role === "admin" ? "admin" : "user"
 
       // Check suspended status before issuing session
-      const [sub] = await sql`SELECT status FROM subscriptions WHERE user_id = ${userId}`
-      if (sub?.status === "suspended") {
+      const activeUser = await getActiveUser(userId)
+      if (!activeUser) {
         return failClosed("account_suspended", { userId })
       }
 
@@ -311,8 +317,8 @@ googleAuth.get("/google/callback", async (c) => {
         userRole = existing.role === "admin" ? "admin" : "user"
 
         // Check suspended status before linking
-        const [sub] = await sql`SELECT status FROM subscriptions WHERE user_id = ${userId}`
-        if (sub?.status === "suspended") {
+        const activeUser = await getActiveUser(userId)
+        if (!activeUser) {
           return failClosed("account_suspended", { userId })
         }
 
@@ -342,21 +348,38 @@ googleAuth.get("/google/callback", async (c) => {
           VALUES (${userId}, 'free', 'active')
           ON CONFLICT (user_id) DO NOTHING
         `
-        await addCredits(userId, WELCOME_CREDITS_DT, "admin_grant", "completed", {
-          adminNote: `Welcome bonus: ${WELCOME_CREDITS_DT} DT granted on Google signup (displays as $${WELCOME_DISPLAY_USD} to user)`,
-        })
+
+        // Welcome grant: check per-IP and canonical-email dedup
+        // Google signups are only granted when email_verified = true (already verified above)
+        const canonical = canonicalEmail(email)
+        const clientIp = c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown"
+        const grantOk = await canGrantWelcomeCredit(clientIp)
+        const canonicalDup = await canonicalEmailAlreadyGranted(canonical)
+
+        if (grantOk && !canonicalDup) {
+          await addCredits(userId, WELCOME_CREDITS_DT, "admin_grant", "completed", {
+            adminNote: `Welcome bonus: ${WELCOME_CREDITS_DT} DT granted on Google signup (email_verified=true)`,
+          })
+          await recordWelcomeGrant(userId, canonical, clientIp)
+        } else {
+          log.warn("google_signup_welcome_grant_blocked", {
+            email,
+            canonical,
+            reason: !grantOk ? "ip_limit_exceeded" : "canonical_email_duplicate",
+          })
+        }
       }
     }
 
     // Final check for suspension before issuing session
-    const [finalSub] = await sql`SELECT status FROM subscriptions WHERE user_id = ${userId}`
-    if (finalSub?.status === "suspended") {
+    const finalActive = await getActiveUser(userId)
+    if (!finalActive) {
       return failClosed("account_suspended", { userId })
     }
 
     // Issue session cookie
-    const session = issueSession(userId, userRole)
-    setCookie(c, SESSION_COOKIE, session.token, SESSION_COOKIE_OPTIONS)
+    const session = await issueSession(userId, userRole)
+    setSessionCookie(c, session.token, userRole)
   } catch (err) {
     return failClosed("db_error", err)
   }

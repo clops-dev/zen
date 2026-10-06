@@ -26,6 +26,7 @@ import { resolveBilledInputTokens } from "../lib/billing-tokens"
 import { SSE_HEADERS } from "../lib/sse-headers"
 import { log } from "../lib/logger"
 import { recordRequestMetrics, recordStageMs } from "../lib/metrics"
+import { getActiveUser } from "../lib/active-user"
 
 export const gateway = new Hono()
 
@@ -311,6 +312,16 @@ gateway.get("/models", requireApiKey(), async (c) => {
 
 gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RATE_LIMIT_RPM, GATEWAY_RATE_LIMIT_WINDOW_MS), async (c) => {
   const user = c.var.apiUser
+  const activeUser = await getActiveUser(user.id)
+  if (!activeUser) {
+    return c.json({
+      error: {
+        message: "Account is suspended or inactive",
+        type: "permission_error",
+        code: "account_suspended",
+      }
+    }, 403)
+  }
   const reqId = c.get("requestId") ?? c.req.header("x-request-id") ?? `req-${Date.now()}`
   const ip =
     c.req.header("cf-connecting-ip") ??

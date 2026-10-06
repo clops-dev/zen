@@ -1,96 +1,50 @@
-# Zen Gateway — Security Notice
+# Security Policy
 
-## ⚠️ Credential Exposure in Git History
+## Supported versions
 
-During Phase 2 audit, the following files were found committed in the git history
-(both in `Initial commit` and subsequent commits):
+Security fixes are provided for the latest release on `main`. Older releases are unsupported unless a release-specific advisory states otherwise.
 
-| File | Severity | Contents |
-|------|----------|----------|
-| `.env` | **CRITICAL** | Live Neon PostgreSQL credentials, API keys, session secret |
+## Reporting a vulnerability
 
-**Specifically, the following credential types were committed:**
+Report suspected vulnerabilities privately to `security@example.com` (placeholder; replace with the maintained security mailbox before publishing). Do not open a public issue containing credentials, exploit details, or sensitive data.
 
-- `DATABASE_URL` — Neon PostgreSQL connection string with password (CRITICAL)
-- `SESSION_SECRET` — 64-char hex secret used for cookie signing (HIGH)
-- `ANTHROPIC_AUTH_TOKEN` — AgentRouter Anthropic-compatible API key (HIGH)
-- `AGENTROUTER_API_KEY` — AgentRouter OpenAI-compatible API key (HIGH)
-- `ADMIN_PASSWORD` — Bootstrap admin password (MEDIUM)
+Include the affected version or commit, an impact summary, reproduction steps, and a minimal proof of concept where safe. Redact all secrets and personal data.
 
-**DO NOT print or share the actual values — they are already in git history.**
+## Response SLA
 
----
+- Acknowledgement: within 2 business days.
+- Initial triage: within 5 business days.
+- Status updates: at least every 7 business days until resolution.
+- Coordinated disclosure: normally within 90 days, or sooner when exploitation is active.
 
-## Immediate Remediation Steps
+These are targets rather than guarantees.
 
-### 1. Rotate all credentials NOW
+## Safe harbor
 
-Before anything else, rotate every credential that was committed:
+Good-faith security research is authorized when it avoids privacy violations, service disruption, data access beyond what is necessary to demonstrate the issue, and destruction or modification of data. Stop testing and report immediately if you encounter real user data or credentials. We will not pursue legal action for activity that follows this policy and applicable law.
 
-```bash
-# 1. Rotate the Neon database password via the Neon console
-#    → https://console.neon.tech → Settings → Connection string → Reset password
+## Secret exposure response
 
-# 2. Generate a new SESSION_SECRET
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+The repository has a known historical `.env` exposure. It must be treated as compromised until credentials are rotated and history is rewritten by an authorized repository administrator. See `docs/incidents/historical-env-exposure.md` and `docs/security/credential-rotation-checklist.md`.
 
-# 3. Rotate/revoke the AgentRouter API keys
-#    → https://agentrouter.org → API Keys → Revoke old keys, create new ones
+Never commit `.env` files, provider credentials, database URLs containing passwords, session secrets, API keys, private keys, tokens, or real passwords. Use `.env.example` with placeholders only.
 
-# 4. Change the admin password after login via the dashboard
-```
+## Authentication & Anti-Abuse Controls
 
-### 2. Remove the .env from git history
-
-After rotating, purge `.env` from the entire git history:
-
-```bash
-# Using git-filter-repo (recommended):
-pip install git-filter-repo
-git filter-repo --invert-paths --path .env
-
-# OR using BFG Repo Cleaner:
-java -jar bfg.jar --delete-files .env
-git reflog expire --expire=now --all
-git gc --prune=now --aggressive
-git push origin --force --all
-```
-
-> **Note**: All collaborators must re-clone after history rewrite.
-
-### 3. Verify .gitignore is in place
-
-The `.gitignore` now excludes `.env` and all secret files. Verify:
-
-```bash
-git check-ignore -v .env       # Should output: .gitignore:7:.env
-git status                     # .env should NOT appear as an untracked file
-```
-
-### 4. Scan for additional secrets
-
-Run secret scanning on the full history:
-
-```bash
-# Using Gitleaks:
-docker run -v $PWD:/path zricethezav/gitleaks:latest detect --source=/path --no-git
-```
-
----
-
-## Going Forward
-
-- **Never commit `.env`** — use `.env.example` with empty/placeholder values only
-- **Use secrets management** in production: environment variables injected at deploy time
-- **Rotate credentials regularly** — especially after any suspected exposure
-- **Use `.env.production`** (gitignored) for the Compose `env_file:` reference
-
----
-
-## .env.example Policy
-
-`c\.env.example` must NEVER contain real credentials.  
-Use placeholders like `your-value-here` or leave the field blank.
-
-The database URL line in `.env.example` was found to contain what appears to be  
-a real Neon connection string. This should be replaced with a placeholder immediately.
+1. **Email Normalization & Canonicalization**:
+   - Stored in lowercase/trimmed format (`email`).
+   - Canonicalized for uniqueness checks (`canonical_email`) by stripping dots and `+tag` suffixes for Google/Gmail and Protonmail domains to prevent free-credit farming via alias permutations.
+2. **Disposable Email Blocking**:
+   - Domain blocklist loaded at build time (`src/lib/disposable-domains.json`) rejecting registration attempts from disposable or temporary mail providers.
+3. **Welcome Credit Dedup**:
+   - Granted only upon verified email confirmation (`/verify-email`) or Google OAuth verified email.
+   - Deduped per canonical identity (`welcome_grants` table) and throttled per IP window (configurable via `WELCOME_GRANTS_PER_IP_PER_24H`, default 2 per 24 hours).
+4. **Password Policy & Breach Detection**:
+   - Minimum 10 characters required.
+   - Checked against HaveIBeenPwned range API using 5-character SHA-1 k-anonymity (never transmits complete password hashes; fails open on network errors).
+   - Hashed using native Argon2id (`Bun.password`).
+5. **Rate Limiting & Non-Enumerable Responses**:
+   - Endpoints (`/signup`, `/login`, `/verify-email`, `/password-reset/*`, `/device/*`) enforce per-IP and per-target rate limiting in Postgres with exponential backoff and lockout.
+   - Login and signup endpoints return identical response structures and timing for non-existent users (constant-time dummy password verification) to prevent user enumeration.
+6. **Abuse Monitoring & Alerting**:
+   - Spikes in failed logins (>10 per email per 15m), rapid signups (>5 per IP per 1h), and disposable email attempts trigger warning alerts and structured `abuse.*` audit events.

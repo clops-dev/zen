@@ -3,6 +3,9 @@ import { z } from "zod"
 import { normalizeEmail } from "../lib/email"
 import { sql, withDbResilience } from "../lib/db"
 import { requireAdmin } from "../middleware/session-auth"
+import { csrfProtection } from "../middleware/csrf"
+import { revokeAllUserSessions } from "../lib/session"
+import { invalidateActiveUserCache } from "../lib/active-user"
 import { audit, actorEmailFor } from "../lib/audit"
 import { fetchOpenRouterModelMetadata } from "../lib/openrouter"
 
@@ -22,6 +25,7 @@ import {
 
 export const adminApi = new Hono()
 adminApi.use("*", requireAdmin())
+adminApi.use("*", csrfProtection())
 
 adminApi.get("/credit-packages", (c) => c.json({ packages: CREDIT_PACKAGES, dt_per_usd: DT_PER_USD }))
 
@@ -314,7 +318,20 @@ adminApi.patch("/users/:id", async (c) => {
   try {
     const existing = await sql`SELECT id FROM users WHERE id = ${id}`
     if (existing.length === 0) return jsonError(c, 404, "not_found")
-    if (parsed.data.role) await sql`UPDATE users SET role = ${parsed.data.role} WHERE id = ${id}`
+    if (parsed.data.role) {
+      await sql`UPDATE users SET role = ${parsed.data.role} WHERE id = ${id}`
+      await revokeAllUserSessions(id)
+      invalidateActiveUserCache(id)
+    }
+    if (parsed.data.status) {
+      try {
+        await sql`UPDATE users SET status = ${parsed.data.status} WHERE id = ${id}`
+      } catch {}
+      if (parsed.data.status === "suspended") {
+        await revokeAllUserSessions(id)
+        invalidateActiveUserCache(id)
+      }
+    }
     if (
       parsed.data.tier || parsed.data.status || parsed.data.subscription_price_usd !== undefined || parsed.data.token_budget_monthly !== undefined ||
       parsed.data.spending_cap_usd !== undefined || parsed.data.spending_cap_enabled !== undefined || parsed.data.spending_cap_period !== undefined
@@ -362,6 +379,7 @@ adminApi.patch("/users/:id", async (c) => {
       resource: "user",
       resourceId: id,
       ip: ip(c),
+      requestId: c.get("requestId") ?? c.req.header("x-request-id"),
       metadata: parsed.data,
     })
     return c.json({ ok: true })
@@ -376,6 +394,8 @@ adminApi.delete("/users/:id", async (c) => {
   if (id === session.userId) return jsonError(c, 400, "cannot_delete_self")
   try {
     await sql`DELETE FROM users WHERE id = ${id}`
+    await revokeAllUserSessions(id)
+    invalidateActiveUserCache(id)
     await audit({
       actorId: session.userId,
       actorEmail: await actorEmailFor(session.userId),
@@ -383,6 +403,7 @@ adminApi.delete("/users/:id", async (c) => {
       resource: "user",
       resourceId: id,
       ip: ip(c),
+      requestId: c.get("requestId") ?? c.req.header("x-request-id"),
     })
     return c.json({ ok: true })
   } catch (err) {
@@ -1465,6 +1486,7 @@ adminApi.post("/api-keys", async (c) => {
       resource: "api_key",
       resourceId: k.id,
       ip: ip(c),
+      requestId: c.get("requestId") ?? c.req.header("x-request-id"),
       metadata: { user_id: parsed.data.user_id, label: parsed.data.label ?? null },
     })
     return c.json({ id: k.id, api_key: raw, prefix: k.key_prefix, created_at: k.created_at })
@@ -1486,6 +1508,7 @@ adminApi.post("/api-keys/:id/revoke", async (c) => {
       resource: "api_key",
       resourceId: id,
       ip: ip(c),
+      requestId: c.get("requestId") ?? c.req.header("x-request-id"),
     })
     return c.json({ ok: true })
   } catch (err) {

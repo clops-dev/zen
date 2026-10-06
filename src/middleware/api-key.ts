@@ -1,6 +1,7 @@
 import type { MiddlewareHandler } from "hono"
 import { sql } from "../lib/db"
 import { hashApiKey } from "../lib/apikeys"
+import { getActiveUser } from "../lib/active-user"
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -21,8 +22,13 @@ export async function verifyApiKey(raw: string): Promise<{ id: string; email: st
     return null
   }
 
+  const activeUser = await getActiveUser(rows[0].user_id)
+  if (!activeUser) {
+    return null
+  }
+
   await sql`UPDATE api_keys SET last_used_at = now() WHERE key_hash = ${hash}`
-  return { id: rows[0].user_id, email: rows[0].email }
+  return { id: activeUser.id, email: activeUser.email }
 }
 
 /**

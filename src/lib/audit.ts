@@ -4,7 +4,22 @@ export type AuditAction =
   // auth
   | "auth.login"
   | "auth.logout"
+  | "auth.logout_all"
   | "auth.login_failed"
+  | "auth.signup"
+  | "auth.password_change"
+  | "auth.password_reset_requested"
+  | "auth.password_reset_completed"
+  | "auth.mfa_enabled"
+  | "auth.mfa_disabled"
+  | "auth.welcome_grant"
+  | "auth.email_verified"
+  // abuse detection
+  | "abuse.welcome_grant_blocked"
+  | "abuse.signup_spike"
+  | "abuse.failed_login_spike"
+  | "abuse.disposable_email_attempt"
+  | "abuse.disposable_email_spike"
   // user mgmt
   | "user.create"
   | "user.update"
@@ -64,6 +79,7 @@ export type AuditResource =
   | "credit_transaction"
   | "system"
   | "auth"
+  | "abuse"
 
 export type AuditResult = "success" | "failure" | "denied"
 
@@ -74,6 +90,7 @@ export type AuditInput = {
   resource: AuditResource
   resourceId?: string | null
   ip?: string | null
+  requestId?: string | null
   result?: AuditResult
   metadata?: Record<string, unknown>
 }
@@ -85,23 +102,39 @@ export type AuditInput = {
 export async function audit(input: AuditInput): Promise<void> {
   try {
     const result = input.result ?? "success"
-    const metadata = input.metadata ?? {}
-    // postgres-js's sql.json() expects a JSONValue. Cast at the boundary
-    // — metadata is `Record<string, unknown>` because we accept arbitrary
-    // typed application data, but the actual values are JSON-safe.
-    await sql`
-      INSERT INTO audit_logs
-        (actor_id, actor_email, action, resource, resource_id, ip, result, metadata)
-      VALUES
-        (${input.actorId ?? null},
-         ${input.actorEmail ?? null},
-         ${input.action},
-         ${input.resource},
-         ${input.resourceId ?? null},
-         ${input.ip ?? null},
-         ${result},
-         ${sql.json(metadata as Record<string, any>)})
-    `
+    const metadata = { ...(input.metadata ?? {}), ...(input.requestId ? { request_id: input.requestId } : {}) }
+    const jsonMeta = typeof (sql as any).json === "function" ? (sql as any).json(metadata) : JSON.stringify(metadata)
+    try {
+      await sql`
+        INSERT INTO audit_logs
+          (actor_id, actor_email, action, resource, resource_id, ip, request_id, result, metadata)
+        VALUES
+          (${input.actorId ?? null},
+           ${input.actorEmail ?? null},
+           ${input.action},
+           ${input.resource},
+           ${input.resourceId ?? null},
+           ${input.ip ?? null},
+           ${input.requestId ?? null},
+           ${result},
+           ${jsonMeta})
+      `
+    } catch {
+      // Fallback if request_id column does not exist in an older schema
+      await sql`
+        INSERT INTO audit_logs
+          (actor_id, actor_email, action, resource, resource_id, ip, result, metadata)
+        VALUES
+          (${input.actorId ?? null},
+           ${input.actorEmail ?? null},
+           ${input.action},
+           ${input.resource},
+           ${input.resourceId ?? null},
+           ${input.ip ?? null},
+           ${result},
+           ${jsonMeta})
+      `
+    }
   } catch (err) {
     console.error("[audit] failed to record event:", err)
   }
