@@ -11,6 +11,8 @@ import { addCredits, WELCOME_CREDITS_DT, WELCOME_DISPLAY_USD } from "../lib/cred
 
 export const auth = new Hono()
 
+import { normalizeEmail } from "../lib/email"
+
 const signupSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8).max(256),
@@ -21,8 +23,9 @@ auth.post("/signup", async (c) => {
   const parsed = signupSchema.safeParse(body)
   if (!parsed.success) return c.json({ error: "invalid payload", details: parsed.error.flatten() }, 400)
 
-  const { email, password } = parsed.data
-  const existing = await withDbResilience(() => sql`SELECT id FROM users WHERE email = ${email}`)
+  const email = normalizeEmail(parsed.data.email)
+  const { password } = parsed.data
+  const existing = await withDbResilience(() => sql`SELECT id FROM users WHERE lower(email) = ${email}`)
   if (existing.length > 0) return c.json({ error: "email already registered" }, 409)
 
   const hash = await hashPassword(password)
@@ -49,8 +52,9 @@ auth.post("/login", async (c) => {
   const parsed = signupSchema.safeParse(body) // same shape as signup
   if (!parsed.success) return c.json({ error: "invalid payload" }, 400)
 
-  const { email, password } = parsed.data
-  const rows = await withDbResilience(() => sql`SELECT id, password_hash, role FROM users WHERE email = ${email}`)
+  const email = normalizeEmail(parsed.data.email)
+  const { password } = parsed.data
+  const rows = await withDbResilience(() => sql`SELECT id, password_hash, role FROM users WHERE lower(email) = ${email}`)
   if (rows.length === 0) {
     await verifyDummyPassword(password)
     return c.json({ error: "invalid credentials" }, 401)
@@ -59,6 +63,12 @@ auth.post("/login", async (c) => {
   const user = rows[0] as { id: string; password_hash: string; role: "user" | "admin" }
   const ok = await verifyPassword(password, user.password_hash)
   if (!ok) return c.json({ error: "invalid credentials" }, 401)
+
+  // Verify the account is not suspended.
+  const [sub] = await withDbResilience(() => sql`SELECT status FROM subscriptions WHERE user_id = ${user.id}`)
+  if (sub?.status === "suspended") {
+    return c.json({ error: "account_suspended", message: "Your account has been suspended" }, 403)
+  }
 
   // Upgrade successful legacy bcrypt logins opportunistically. A failed
   // upgrade does not reject an otherwise valid login.

@@ -1,5 +1,6 @@
 import { Hono } from "hono"
 import { z } from "zod"
+import { normalizeEmail } from "../lib/email"
 import { sql, withDbResilience } from "../lib/db"
 import { requireAdmin } from "../middleware/session-auth"
 import { audit, actorEmailFor } from "../lib/audit"
@@ -241,9 +242,10 @@ adminApi.post("/users", async (c) => {
   const body = await c.req.json().catch(() => null)
   const parsed = userCreateSchema.safeParse(body)
   if (!parsed.success) return jsonError(c, 400, "invalid_payload", JSON.stringify(parsed.error.flatten()))
-  const { email, password, role, tier, subscription_price_usd, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period } = parsed.data
+  const { email: rawEmail, password, role, tier, subscription_price_usd, token_budget_monthly, spending_cap_usd, spending_cap_enabled, spending_cap_period } = parsed.data
+  const email = normalizeEmail(rawEmail)
   try {
-    const existing = await sql`SELECT id FROM users WHERE email = ${email}`
+    const existing = await sql`SELECT id FROM users WHERE lower(email) = ${email}`
     if (existing.length > 0) return jsonError(c, 409, "email_taken")
     const { hashPassword } = await import("../lib/password")
     const hash = await hashPassword(password)
