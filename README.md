@@ -532,7 +532,8 @@ All configuration is via environment variables. Set these in `.env.production`
 |----------|-------------|---------|
 | `DATABASE_URL` | PostgreSQL connection string (Neon URL in production) | `postgresql://user:pass@host/db?sslmode=require` |
 | `SESSION_SECRET` | ≥32-char hex string for cookie signing | `openssl rand -hex 32` |
-| `ADMIN_EMAIL` | Bootstrap admin account email | `admin@yourdomain.com` |
+| `ADMIN_EMAIL` | Configured administrator account email | `admin@yourdomain.com` |
+| `ADMIN_MFA_REQUIRED` | Require MFA for administrator login (default `true`) | `true` |
 | `ADMIN_PASSWORD` | Bootstrap admin password (≥8 chars) | `change-me-on-first-login` |
 
 > ⚠️ `ADMIN_PASSWORD` is only used on first boot to create the admin account

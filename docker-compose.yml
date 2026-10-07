@@ -107,6 +107,7 @@ services:
       #   SESSION_SECRET=<64-char hex>
       #   ADMIN_EMAIL=<admin@yourdomain.com>
       #   ADMIN_PASSWORD=<strong-password>
+      #   ADMIN_MFA_REQUIRED=true  # set false only for dev/small deployments
       # It must NOT contain:
       #   - provider API keys baked in (set these via the admin dashboard)
       # See .env.example for the full schema.

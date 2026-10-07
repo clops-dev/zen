@@ -62,6 +62,12 @@ web.post("/login", async (c) => {
   const activeUser = await getActiveUser(user.id)
   if (!activeUser) return c.redirect("/login?error=account+suspended", 303)
 
+  // The form flow has no TOTP challenge, so it must not issue an admin
+  // session while administrator MFA is required.
+  if (activeUser.role === "admin" && env.ADMIN_MFA_REQUIRED) {
+    return c.redirect("/login?error=mfa+required", 303)
+  }
+
   const existingToken = getSessionToken(c)
   if (existingToken) {
     await revokeSession(existingToken)

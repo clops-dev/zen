@@ -7,6 +7,7 @@ import { invalidateActiveUserCache } from "../lib/active-user"
 import { hashPassword } from "../lib/password"
 import { generateTotpCode, generateTotpSecret, hashRecoveryCode } from "../lib/totp"
 import { createHash } from "node:crypto"
+import { env } from "../lib/env"
 
 describe("Auth Route Hardening & Attack Tests", () => {
   interface MockUser {
@@ -264,6 +265,9 @@ describe("Auth Route Hardening & Attack Tests", () => {
   })
 
   test("admin accounts require TOTP MFA to complete login", async () => {
+    const originalMfaRequired = env.ADMIN_MFA_REQUIRED
+    ;(env as { ADMIN_MFA_REQUIRED: boolean }).ADMIN_MFA_REQUIRED = true
+    try {
     const pwHash = await hashPassword("adminpass123")
     const secret = generateTotpSecret()
     users.push({ id: "admin-1", email: "admin@example.com", password_hash: pwHash, role: "admin", status: "active" })
@@ -298,5 +302,44 @@ describe("Auth Route Hardening & Attack Tests", () => {
     expect(res3.status).toBe(200)
     const body3 = await res3.json()
     expect(body3.role).toBe("admin")
+    } finally {
+      ;(env as { ADMIN_MFA_REQUIRED: boolean }).ADMIN_MFA_REQUIRED = originalMfaRequired
+    }
+  })
+
+  test("admin login skips enrolled MFA when ADMIN_MFA_REQUIRED is false", async () => {
+    const originalMfaRequired = env.ADMIN_MFA_REQUIRED
+    ;(env as { ADMIN_MFA_REQUIRED: boolean }).ADMIN_MFA_REQUIRED = false
+    try {
+      const pwHash = await hashPassword("adminpass123")
+      users.push({ id: "admin-1", email: "admin@example.com", password_hash: pwHash, role: "admin", status: "active" })
+      mfas.push({ user_id: "admin-1", totp_secret: generateTotpSecret(), enabled: true })
+      const res = await app.request("http://localhost:8787/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "admin@example.com", password: "adminpass123" }),
+      })
+      expect(res.status).toBe(200)
+      expect((await res.json()).role).toBe("admin")
+      expect(res.headers.get("set-cookie")).toContain(SESSION_COOKIE)
+    } finally {
+      ;(env as { ADMIN_MFA_REQUIRED: boolean }).ADMIN_MFA_REQUIRED = originalMfaRequired
+    }
+  })
+
+  test("admin@zen.com has no special role when it differs from ADMIN_EMAIL", async () => {
+    const originalAdminEmail = env.ADMIN_EMAIL
+    ;(env as { ADMIN_EMAIL: string }).ADMIN_EMAIL = "configured@example.com"
+    try {
+      const pwHash = await hashPassword("userpass123")
+      users.push({ id: "user-1", email: "admin@zen.com", password_hash: pwHash, role: "user", status: "active" })
+      const res = await app.request("http://localhost:8787/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "admin@zen.com", password: "userpass123" }),
+      })
+      expect(res.status).toBe(200)
+      expect((await res.json()).role).toBe("user")
+    } finally {
+      ;(env as { ADMIN_EMAIL: string }).ADMIN_EMAIL = originalAdminEmail
+    }
   })
 })

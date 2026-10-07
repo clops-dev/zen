@@ -1,8 +1,5 @@
 import type { MiddlewareHandler } from "hono"
 import { getSessionToken, verifySession } from "../lib/session"
-import { sql, withDbResilience } from "../lib/db"
-import { normalizeEmail } from "../lib/email"
-import { env } from "../lib/env"
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -32,20 +29,10 @@ export const requireAdmin = (): MiddlewareHandler => async (c, next) => {
     if (isApi) return c.json({ error: "unauthorized", message: "Authentication required" }, 401)
     return c.redirect("/login", 303)
   }
-  const [currentUser] = await withDbResilience(() => sql`
-    SELECT email, role FROM users WHERE id = ${session.userId} LIMIT 1
-  `)
-  const currentEmail = normalizeEmail(String(currentUser?.email ?? ""))
-  const isConfiguredAdmin = currentEmail === normalizeEmail(env.ADMIN_EMAIL) || currentEmail === "admin@zen.com"
-  if (currentUser?.role !== "admin" && !isConfiguredAdmin) {
+  if (session.role !== "admin") {
     if (isApi) return c.json({ error: "forbidden", message: "Admin access required" }, 403)
     return c.html("<h1>403 — admin access required</h1>", 403)
   }
-  if (currentUser?.role !== "admin") {
-    await withDbResilience(() => sql`
-      UPDATE users SET role = 'admin', status = 'active' WHERE id = ${session.userId}
-    `)
-  }
-  c.set("session", { ...session, role: "admin" })
+  c.set("session", session)
   return next()
 }

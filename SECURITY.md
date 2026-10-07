@@ -31,6 +31,10 @@ Never commit `.env` files, provider credentials, database URLs containing passwo
 
 ## Authentication & Anti-Abuse Controls
 
+`ADMIN_MFA_REQUIRED` defaults to `true`. Setting it to `false` disables MFA for
+the configured administrator and is appropriate only for development or small,
+explicitly accepted deployments; production administrators should keep MFA enabled.
+
 1. **Email Normalization & Canonicalization**:
    - Stored in lowercase/trimmed format (`email`).
    - Canonicalized for uniqueness checks (`canonical_email`) by stripping dots and `+tag` suffixes for Google/Gmail and Protonmail domains to prevent free-credit farming via alias permutations.

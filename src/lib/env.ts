@@ -11,6 +11,10 @@ export const envSchema = z.object({
   // Change the password via the dashboard after first login.
   ADMIN_EMAIL: z.string().email(),
   ADMIN_PASSWORD: z.string().min(8),
+  ADMIN_MFA_REQUIRED: z.preprocess(
+    (value) => value === "false" || value === "0" ? false : value === "true" || value === "1" ? true : value,
+    z.boolean().default(true),
+  ),
 
   // Default monthly token budget for new free-tier signups.
   DEFAULT_FREE_TOKEN_BUDGET: z.coerce.number().int().positive().default(50000),

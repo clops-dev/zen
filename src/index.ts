@@ -2,9 +2,12 @@ import app from "./server"
 import { env } from "./lib/env"
 import { runMigrations } from "./lib/migrate"
 import { sql } from "./lib/db"
-import { hashPassword } from "./lib/password"
+import { hashPassword, verifyPassword } from "./lib/password"
 import { log } from "./lib/logger"
 import { setReady } from "./lib/readiness"
+import { bootstrapConfiguredAdmin } from "./lib/admin-bootstrap"
+import { revokeAllUserSessions } from "./lib/session"
+import { invalidateActiveUserCache } from "./lib/active-user"
 
 /** Format any thrown value into a useful single-line string. Used by
  * boot-time bootstrap handlers so we never log "[stage] failed:
@@ -66,37 +69,11 @@ try {
 }
 
 try {
-  const [configuredAdmin] = await sql`
-    SELECT id FROM users WHERE lower(email) = lower(${env.ADMIN_EMAIL}) LIMIT 1
-  `
-
-  let adminUser = configuredAdmin
-  if (adminUser) {
-    const [promoted] = await sql`
-      -- Keep this compatible with databases created before account-status
-      -- support.  The account is already able to log in, so its status must
-      -- not prevent the configured administrator from being promoted.
-      UPDATE users SET role = 'admin'
-      WHERE id = ${adminUser.id}
-      RETURNING id
-    `
-    adminUser = promoted
-  } else {
-    const hash = await hashPassword(env.ADMIN_PASSWORD)
-    const [created] = await sql`
-      INSERT INTO users (email, password_hash, role, status)
-      VALUES (${env.ADMIN_EMAIL}, ${hash}, 'admin', 'active')
-      RETURNING id
-    `
-    adminUser = created
-    console.log(`[bootstrap] created admin account: ${env.ADMIN_EMAIL}`)
-  }
-
-  await sql`
-    INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly)
-    VALUES (${adminUser.id}, 'enterprise', 'active', 999999999)
-    ON CONFLICT (user_id) DO NOTHING
-  `
+  const result = await bootstrapConfiguredAdmin({
+    sql, email: env.ADMIN_EMAIL, password: env.ADMIN_PASSWORD, hashPassword,
+    verifyPassword, revokeAllSessions: revokeAllUserSessions, invalidateActiveUserCache,
+  })
+  if (result.passwordSynced) console.log("[bootstrap] admin password synced")
   console.log(`[bootstrap] configured admin account ready: ${env.ADMIN_EMAIL}`)
 } catch (err) {
   console.error("[bootstrap] failed to create admin account:", formatError(err))

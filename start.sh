@@ -52,6 +52,8 @@ BCRYPT_COST=12
 # Bootstrap admin (Created automatically on first boot)
 ADMIN_EMAIL=admin@zen.com
 ADMIN_PASSWORD=admin123456
+# Set false only for development/small deployments without admin MFA.
+ADMIN_MFA_REQUIRED=false
 
 # Default monthly token budget
 DEFAULT_FREE_TOKEN_BUDGET=50000

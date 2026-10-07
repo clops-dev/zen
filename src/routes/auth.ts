@@ -473,7 +473,7 @@ auth.post("/login", async (c) => {
   }
 
   const loginEmail = normalizeEmail(user.email ?? email)
-  const isBootstrapAdmin = loginEmail === normalizeEmail(env.ADMIN_EMAIL) || loginEmail === "admin@zen.com"
+  const isBootstrapAdmin = loginEmail === normalizeEmail(env.ADMIN_EMAIL)
   if (isBootstrapAdmin && user.role !== "admin") {
     const [promoted] = await withDbResilience(() => sql`
       UPDATE users SET role = 'admin', status = 'active'
@@ -503,7 +503,7 @@ auth.post("/login", async (c) => {
 
   const mfa = mfaRows[0]
   const isMfaEnrolled = mfa && mfa.enabled
-  const isMfaRequired = activeUser.role === "admin" || isMfaEnrolled
+  const isMfaRequired = activeUser.role === "admin" ? env.ADMIN_MFA_REQUIRED : Boolean(isMfaEnrolled)
 
   if (isMfaRequired) {
     if (!isMfaEnrolled && activeUser.role === "admin") {

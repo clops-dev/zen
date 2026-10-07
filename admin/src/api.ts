@@ -29,7 +29,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       throw new ApiClientError("unauthorized", "Authentication required. Please log in.", 401)
     }
     if (res.status === 403) {
-      throw new ApiClientError("forbidden", "Admin access required. Your account does not have admin permissions.", 403)
+      throw new ApiClientError(body?.error ?? "forbidden", body?.message || "Access forbidden. Please check your account permissions.", 403)
     }
     const err = body as ApiError | null
     const fallbackMsg = text?.startsWith("<")
@@ -240,6 +240,9 @@ export const login = async (email: string, password: string) => {
   })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new ApiClientError(body?.error ?? "login_failed", body?.message ?? "Login failed", res.status)
+  if (body?.mfa_required || body?.mfa_setup_required) {
+    throw new ApiClientError("mfa_required", "MFA required by server, set ADMIN_MFA_REQUIRED=false or add MFA support", 200)
+  }
   return body
 }
 
