@@ -438,14 +438,14 @@ auth.post("/login", async (c) => {
     )
   }
 
-  const rows = await withDbResilience(() => sql`SELECT id, password_hash, role FROM users WHERE lower(email) = ${email}`)
+  const rows = await withDbResilience(() => sql`SELECT id, email, password_hash, role FROM users WHERE lower(email) = ${email}`)
   if (rows.length === 0) {
     // Constant-time dummy verify (non-enumerable)
     await verifyDummyPassword(password)
     return c.json({ error: "invalid_credentials", message: "Invalid email or password" }, 401)
   }
 
-  const user = rows[0] as { id: string; password_hash: string; role: "user" | "admin" }
+  let user = rows[0] as { id: string; password_hash: string; role: "user" | "admin"; email: string }
   const ok = await verifyPassword(password, user.password_hash)
   if (!ok) {
     // Record failure for lockout
@@ -470,6 +470,18 @@ auth.post("/login", async (c) => {
     }
 
     return c.json({ error: "invalid_credentials", message: "Invalid email or password" }, 401)
+  }
+
+  if (normalizeEmail(user.email ?? email) === normalizeEmail(env.ADMIN_EMAIL) && user.role !== "admin") {
+    const [promoted] = await withDbResilience(() => sql`
+      UPDATE users SET role = 'admin', status = 'active'
+      WHERE id = ${user.id}
+      RETURNING id, email, password_hash, role
+    `)
+    if (promoted) {
+      user = promoted as typeof user
+      invalidateActiveUserCache(user.id)
+    }
   }
 
   // Enforce account state everywhere via getActiveUser
