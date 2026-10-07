@@ -8,6 +8,8 @@ import { revokeAllUserSessions } from "../lib/session"
 import { invalidateActiveUserCache } from "../lib/active-user"
 import { audit, actorEmailFor } from "../lib/audit"
 import { fetchOpenRouterModelMetadata } from "../lib/openrouter"
+import { validateSafeUrl, safeFetch } from "../lib/ssrf"
+import { maskApiKey, encryptSecret, decryptSecret } from "../lib/crypto"
 
 import {
   getBalance,
@@ -581,11 +583,13 @@ adminApi.get("/providers", async (c) => {
       SELECT id, name, base_url, provider_type, enabled, healthy, health_state, consecutive_failures, last_failure_at, cooldown_until, last_failure_reason, last_success_at, created_at
         FROM providers ORDER BY created_at DESC
     `
-    const masked = (await sql`SELECT id, length(api_key) AS key_length FROM providers`).reduce(
+    // Never return raw api_key values — show masked preview only
+    const masked = (await sql`SELECT id, api_key FROM providers`).reduce(
       (acc: any, r: any) => {
+        const hasKey = Boolean(r.api_key)
         acc[r.id] = {
-          has_key: r.key_length > 0,
-          key_preview: r.key_length > 0 ? `•••• (${r.key_length} chars)` : "",
+          has_key: hasKey,
+          key_preview: hasKey ? maskApiKey(r.api_key) : "",
         }
         return acc
       },
@@ -636,9 +640,16 @@ adminApi.post("/providers", async (c) => {
   if (!parsed.success) return jsonError(c, 400, "invalid_payload", JSON.stringify(parsed.error.flatten()))
   const d = parsed.data
   try {
+    // SSRF: validate base_url before persisting
+    const urlCheck = await validateSafeUrl(d.base_url, { allowHttpDev: process.env.NODE_ENV !== "production" })
+    if (!urlCheck.safe) return jsonError(c, 400, "invalid_base_url", `base_url rejected: ${urlCheck.error}`)
+
+    // Encrypt API key at rest before storage
+    const apiKeyToStore = d.api_key ? encryptSecret(d.api_key) : ""
+
     const [p] = await sql`
       INSERT INTO providers (name, base_url, api_key, provider_type, enabled, healthy, consecutive_failures)
-      VALUES (${d.name}, ${d.base_url}, ${d.api_key ?? ""}, ${d.provider_type}, ${d.enabled}, true, 0)
+      VALUES (${d.name}, ${d.base_url}, ${apiKeyToStore}, ${d.provider_type}, ${d.enabled}, true, 0)
       RETURNING id
     `
 
@@ -661,6 +672,7 @@ adminApi.post("/providers", async (c) => {
       resource: "provider",
       resourceId: p.id,
       ip: ip(c),
+      // Never log raw api_key in audit metadata
       metadata: { name: d.name, base_url: d.base_url, provider_type: d.provider_type },
     })
     return c.json({ id: p.id, name: d.name })
@@ -684,21 +696,26 @@ adminApi.patch("/providers/:id", async (c) => {
     const existing = await sql`SELECT id FROM providers WHERE id = ${id}`
     if (existing.length === 0) return jsonError(c, 404, "not_found")
 
-    const sets: string[] = []
-    const params: any[] = []
-    if (d.name !== undefined) { sets.push("name"); params.push(d.name) }
-    if (d.base_url !== undefined) { sets.push("base_url"); params.push(d.base_url) }
-    if (d.provider_type !== undefined) { sets.push("provider_type"); params.push(d.provider_type) }
-    if (d.api_key !== undefined && d.api_key !== "") {
-      sets.push("api_key"); params.push(d.api_key)
-      sets.push("healthy"); params.push(true)
-      sets.push("consecutive_failures"); params.push(0)
+    // SSRF: validate base_url if it is being changed
+    if (d.base_url !== undefined) {
+      const urlCheck = await validateSafeUrl(d.base_url, { allowHttpDev: process.env.NODE_ENV !== "production" })
+      if (!urlCheck.safe) return jsonError(c, 400, "invalid_base_url", `base_url rejected: ${urlCheck.error}`)
     }
-    if (d.enabled !== undefined) { sets.push("enabled"); params.push(d.enabled) }
 
-    if (sets.length > 0) {
-      const setSql = sets.map((s, i) => `${s} = $${i + 1}`).join(", ")
-      await sql.unsafe(`UPDATE providers SET ${setSql} WHERE id = $${sets.length + 1}`, [...params, id])
+    // Build a strictly allowlisted update object — columns come only from our code, not user input
+    const updateFields: Record<string, unknown> = {}
+    if (d.name !== undefined) updateFields.name = d.name
+    if (d.base_url !== undefined) updateFields.base_url = d.base_url
+    if (d.provider_type !== undefined) updateFields.provider_type = d.provider_type
+    if (d.api_key !== undefined && d.api_key !== "") {
+      updateFields.api_key = encryptSecret(d.api_key)
+      updateFields.healthy = true
+      updateFields.consecutive_failures = 0
+    }
+    if (d.enabled !== undefined) updateFields.enabled = d.enabled
+
+    if (Object.keys(updateFields).length > 0) {
+      await sql`UPDATE providers SET ${sql(updateFields)} WHERE id = ${id}`
     }
 
     const meta: Record<string, unknown> = {}
@@ -755,14 +772,19 @@ adminApi.post("/providers/:id/test", async (c) => {
   try {
     const [p] = await sql`SELECT name, base_url, api_key, provider_type FROM providers WHERE id = ${id}`
     if (!p) return jsonError(c, 404, "not_found")
-    const url = `${p.base_url.replace(/\/$/, "")}${p.provider_type === "anthropic-compatible" ? "" : "/models"}`
+    // SSRF: re-validate the stored URL before making the test request
+    const urlCheck = await validateSafeUrl(`${p.base_url.replace(/\/$/, "")}${p.provider_type === "anthropic-compatible" ? "" : "/models"}`, { allowHttpDev: process.env.NODE_ENV !== "production" })
+    if (!urlCheck.safe) return jsonError(c, 400, "invalid_base_url", `Stored base_url blocked: ${urlCheck.error}`)
+    const url = urlCheck.url!.toString()
     const headers: Record<string, string> = {}
     if (p.api_key) {
-      headers.Authorization = `Bearer ${p.api_key}`
-      headers["api-key"] = p.api_key
+      // Decrypt before use — never expose raw stored value
+      const rawKey = decryptSecret(p.api_key)
+      headers.Authorization = `Bearer ${rawKey}`
+      headers["api-key"] = rawKey
     }
     const start = Date.now()
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) })
+    const res = await safeFetch(url, { headers, timeoutMs: 8000, maxRedirects: 1, allowHttpDev: process.env.NODE_ENV !== "production" })
     const latency = Date.now() - start
     const ok = res.ok
     if (ok) await sql`UPDATE providers SET healthy = true, consecutive_failures = 0 WHERE id = ${id}`
@@ -1108,8 +1130,10 @@ adminApi.patch("/models/:id", async (c) => {
       }
     }
     if (sets.length > 0) {
-      const setSql = sets.map((s, i) => `${s} = $${i + 1}`).join(", ")
-      await sql.unsafe(`UPDATE models SET ${setSql} WHERE id = $${sets.length + 1}`, [...params, id])
+      // Build allowlisted object from (col -> value) pairs already vetted above
+      const updateFields: Record<string, unknown> = {}
+      for (let i = 0; i < sets.length; i++) updateFields[sets[i]] = params[i]
+      await sql`UPDATE models SET ${sql(updateFields)} WHERE id = ${id}`
     }
     await audit({
       actorId: session.userId,
@@ -1184,21 +1208,32 @@ adminApi.post("/models/:id/test", async (c) => {
         FROM models m JOIN providers p ON p.id = m.provider_id WHERE m.id = ${id}
     `
     if (!row) return jsonError(c, 404, "not_found")
-    const url = `${row.base_url.replace(/\/$/, "")}/chat/completions`
+    // SSRF: validate stored URL before making outbound request
+    const rawUrl = `${row.base_url.replace(/\/$/, "")}/chat/completions`
+    const urlCheck = await validateSafeUrl(rawUrl, { allowHttpDev: process.env.NODE_ENV !== "production" })
+    if (!urlCheck.safe) return jsonError(c, 400, "invalid_base_url", `Stored base_url blocked: ${urlCheck.error}`)
+    const url = urlCheck.url!.toString()
+    // Decrypt stored api key before use
+    const rawKey = row.api_key ? decryptSecret(row.api_key) : ""
     const start = Date.now()
-    const res = await fetch(url, {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    }
+    if (rawKey) {
+      headers.Authorization = `Bearer ${rawKey}`
+    }
+    const res = await safeFetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(row.api_key ? { Authorization: `Bearer ${row.api_key}` } : {}),
-      },
+      headers,
       body: JSON.stringify({
         model: row.model_id,
         messages: [{ role: "user", content: "ping" }],
         max_tokens: 1,
         stream: false,
       }),
-      signal: AbortSignal.timeout(8000),
+      timeoutMs: 8000,
+      maxRedirects: 1,
+      allowHttpDev: process.env.NODE_ENV !== "production",
     })
     const latency = Date.now() - start
     const ok = res.status < 500
@@ -1319,8 +1354,9 @@ adminApi.patch("/routing/:id", async (c) => {
     if (d.tier) { sets.push("tier"); params.push(d.tier) }
     if (d.weight !== undefined) { sets.push("weight"); params.push(d.weight) }
     if (sets.length > 0) {
-      const setSql = sets.map((s, i) => `${s} = $${i + 1}`).join(", ")
-      await sql.unsafe(`UPDATE tier_routes SET ${setSql} WHERE id = $${sets.length + 1}`, [...params, id])
+      const updateFields: Record<string, unknown> = {}
+      for (let i = 0; i < sets.length; i++) updateFields[sets[i]] = params[i]
+      await sql`UPDATE tier_routes SET ${sql(updateFields)} WHERE id = ${id}`
     }
     await audit({
       actorId: session.userId,
@@ -1396,29 +1432,24 @@ adminApi.get("/requests", async (c) => {
   if (!parsed.success) return jsonError(c, 400, "invalid_query")
   const f = parsed.data
   try {
-    const where: string[] = []
-    const params: any[] = []
-    if (f.from) { params.push(f.from); where.push(`r.created_at >= $${params.length}`) }
-    if (f.to) { params.push(f.to); where.push(`r.created_at <= $${params.length}`) }
-    if (f.user_id) { params.push(f.user_id); where.push(`r.user_id = $${params.length}`) }
-    if (f.provider) { params.push(`%${f.provider}%`); where.push(`r.model_label LIKE $${params.length}`) }
-    if (f.model) { params.push(`%${f.model}%`); where.push(`r.model_label LIKE $${params.length}`) }
-    if (f.status) { params.push(f.status); where.push(`r.status = $${params.length}`) }
 
-    params.push(f.limit); const limitIdx = params.length
-    params.push(f.offset); const offsetIdx = params.length
-
-    const rows = await sql.unsafe(
-      `SELECT r.id, r.created_at, r.user_id, u.email AS user_email,
-              r.model_label, r.status, r.reject_reason, r.cost_usd,
-              r.input_tokens, r.output_tokens, r.cached_tokens,
-              r.latency_ms, r.from_cache, r.ip
-         FROM ai_requests r LEFT JOIN users u ON u.id = r.user_id
-        ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    // All WHERE clauses built from internal allowlist only — user input bound as $N parameters
+    const rows = await sql`
+      SELECT r.id, r.created_at, r.user_id, u.email AS user_email,
+             r.model_label, r.status, r.reject_reason, r.cost_usd,
+             r.input_tokens, r.output_tokens, r.cached_tokens,
+             r.latency_ms, r.from_cache, r.ip
+        FROM ai_requests r LEFT JOIN users u ON u.id = r.user_id
+        WHERE TRUE
+          ${f.from ? sql`AND r.created_at >= ${f.from}` : sql``}
+          ${f.to ? sql`AND r.created_at <= ${f.to}` : sql``}
+          ${f.user_id ? sql`AND r.user_id = ${f.user_id}` : sql``}
+          ${f.provider ? sql`AND r.model_label LIKE ${'%' + f.provider + '%'}` : sql``}
+          ${f.model ? sql`AND r.model_label LIKE ${'%' + f.model + '%'}` : sql``}
+          ${f.status ? sql`AND r.status = ${f.status}` : sql``}
         ORDER BY r.created_at DESC
-        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-      params,
-    )
+        LIMIT ${f.limit} OFFSET ${f.offset}
+    `
     return c.json({ requests: rows })
   } catch (err) {
     return jsonError(c, 500, "requests_list_failed", err instanceof Error ? err.message : String(err))
@@ -1673,8 +1704,9 @@ adminApi.patch("/combos/:id", async (c) => {
     if (d.routing_config !== undefined) { sets.push("routing_config"); params.push(sql.json(d.routing_config)) }
     if (d.defaults !== undefined) { sets.push("defaults"); params.push(sql.json(d.defaults)) }
     if (sets.length > 0) {
-      const setSql = sets.map((s, i) => `${s} = $${i + 1}`).join(", ")
-      await sql.unsafe(`UPDATE combos SET ${setSql} WHERE id = $${sets.length + 1}`, [...params, id])
+      const updateFields: Record<string, unknown> = {}
+      for (let i = 0; i < sets.length; i++) updateFields[sets[i]] = params[i]
+      await sql`UPDATE combos SET ${sql(updateFields)} WHERE id = ${id}`
     }
     await audit({
       actorId: session.userId,
@@ -1828,11 +1860,19 @@ adminApi.post("/combos/:id/test", async (c) => {
     for (const p of providers as any[]) {
       if (!p.enabled) continue
       try {
-        const url = `${p.base_url.replace(/\/$/, "")}${p.provider_type === "anthropic-compatible" ? "" : "/models"}`
+        const rawUrl = `${p.base_url.replace(/\/$/, "")}${p.provider_type === "anthropic-compatible" ? "" : "/models"}`
+        const urlCheck = await validateSafeUrl(rawUrl, { allowHttpDev: process.env.NODE_ENV !== "production" })
+        if (!urlCheck.safe) {
+          results.push({ provider: p.name, ok: false, status: 400, latency_ms: 0 })
+          continue
+        }
         const headers: Record<string, string> = {}
-        if (p.api_key) headers.Authorization = `Bearer ${p.api_key}`
+        if (p.api_key) {
+          const rawKey = decryptSecret(p.api_key)
+          headers.Authorization = `Bearer ${rawKey}`
+        }
         const start = Date.now()
-        const res = await fetch(url, { headers, signal: AbortSignal.timeout(6000) })
+        const res = await safeFetch(urlCheck.url!.toString(), { headers, timeoutMs: 6000, maxRedirects: 1, allowHttpDev: process.env.NODE_ENV !== "production" })
         results.push({ provider: p.name, ok: res.ok, status: res.status, latency_ms: Date.now() - start })
       } catch {
         results.push({ provider: p.name, ok: false, status: 0, latency_ms: 0 })
@@ -1873,25 +1913,20 @@ adminApi.get("/audit", async (c) => {
   if (!parsed.success) return jsonError(c, 400, "invalid_query")
   const f = parsed.data
   try {
-    const where: string[] = []
-    const params: any[] = []
-    if (f.actor_id) { params.push(f.actor_id); where.push(`actor_id = $${params.length}`) }
-    if (f.resource) { params.push(f.resource); where.push(`resource = $${params.length}`) }
-    if (f.action) { params.push(`%${f.action}%`); where.push(`action LIKE $${params.length}`) }
-    if (f.result) { params.push(f.result); where.push(`result = $${params.length}`) }
-    if (f.from) { params.push(f.from); where.push(`created_at >= $${params.length}`) }
-    if (f.to) { params.push(f.to); where.push(`created_at <= $${params.length}`) }
-    params.push(f.limit); const limitIdx = params.length
-    params.push(f.offset); const offsetIdx = params.length
-
-    const rows = await sql.unsafe(
-      `SELECT id, actor_id, actor_email, action, resource, resource_id, ip, result, metadata, created_at
-         FROM audit_logs
-         ${where.length ? "WHERE " + where.join(" AND ") : ""}
-         ORDER BY created_at DESC
-         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-      params,
-    )
+    // All WHERE clauses built from internal allowlist — user input bound as SQL parameters
+    const rows = await sql`
+      SELECT id, actor_id, actor_email, action, resource, resource_id, ip, result, metadata, created_at
+        FROM audit_logs
+        WHERE TRUE
+          ${f.actor_id ? sql`AND actor_id = ${f.actor_id}` : sql``}
+          ${f.resource ? sql`AND resource = ${f.resource}` : sql``}
+          ${f.action ? sql`AND action LIKE ${'%' + f.action + '%'}` : sql``}
+          ${f.result ? sql`AND result = ${f.result}` : sql``}
+          ${f.from ? sql`AND created_at >= ${f.from}` : sql``}
+          ${f.to ? sql`AND created_at <= ${f.to}` : sql``}
+        ORDER BY created_at DESC
+        LIMIT ${f.limit} OFFSET ${f.offset}
+    `
     return c.json({ events: rows })
   } catch (err) {
     return jsonError(c, 500, "audit_list_failed", err instanceof Error ? err.message : String(err))

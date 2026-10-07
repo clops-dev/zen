@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "bun:test"
+import { describe, test, expect, beforeEach, afterAll } from "bun:test"
 import {
   issueSession,
   verifySession,
@@ -7,7 +7,7 @@ import {
   SESSION_COOKIE,
   HOST_SESSION_COOKIE,
 } from "./session"
-import { setSql } from "./db"
+import { setSql, resetSql } from "./db"
 import { invalidateActiveUserCache } from "./active-user"
 import { createHash } from "node:crypto"
 
@@ -211,5 +211,10 @@ describe("Server-side Session Management", () => {
     invalidateActiveUserCache("user-1")
 
     expect(await verifySession(issued.token)).toBeNull()
+  })
+
+  afterAll(() => {
+    resetSql()
+    invalidateActiveUserCache()
   })
 })

@@ -7,6 +7,7 @@ import { adminApi } from "./routes/admin-api"
 import { googleAuth } from "./routes/google-auth"
 import { userApi } from "./routes/user-api"
 import { requestId } from "./middleware/request-id"
+import { securityHeaders } from "./middleware/security-headers"
 import { readyz } from "./lib/readiness"
 import { log } from "./lib/logger"
 import { renderMetrics } from "./lib/metrics"
@@ -25,6 +26,10 @@ const isProd = (process.env.NODE_ENV ?? "development") === "production"
 // stamp the same correlation id. Mount it before the routes (which don't
 // add it themselves).
 app.use("*", requestId())
+
+// Security headers on all responses (CSP, X-Content-Type-Options, X-Frame-Options, HSTS)
+app.use("*", securityHeaders())
+
 
 // ---------------------------------------------------------------------------
 // Health / readiness endpoints.

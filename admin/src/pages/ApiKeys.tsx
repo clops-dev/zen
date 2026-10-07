@@ -131,7 +131,7 @@ function showKeyModal(key: string, prefix: string) {
     <div style="font-family:system-ui;padding:24px;background:#000;color:#fafafa;border:1px solid #262626;border-radius:8px;max-width:480px">
       <h3 style="color:#ef4444;margin:0 0 12px">New API key</h3>
       <p style="color:#8c8c8c;font-size:13px;margin:0 0 8px">Copy this key now — it will not be shown again.</p>
-      <code id="k" style="display:block;background:#0c0c0c;color:#fafafa;padding:12px;border:1px solid #262626;border-radius:6px;word-break:break-all;font-family:ui-monospace,monospace;font-size:13px">${key}</code>
+      <code id="k" style="display:block;background:#0c0c0c;color:#fafafa;padding:12px;border:1px solid #262626;border-radius:6px;word-break:break-all;font-family:ui-monospace,monospace;font-size:13px"></code>
       <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
         <button id="cp" style="padding:6px 14px;border-radius:6px;background:#ef4444;color:#fff;border:0;cursor:pointer;font-weight:600">Copy</button>
         <button id="ok" style="padding:6px 14px;border-radius:6px;background:#0c0c0c;color:#fafafa;border:1px solid #404040;cursor:pointer">Done</button>
@@ -140,6 +140,8 @@ function showKeyModal(key: string, prefix: string) {
   const wrap = document.createElement("div")
   wrap.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.6);display:grid;place-items:center;z-index:100"
   wrap.innerHTML = html
+  const codeEl = wrap.querySelector("#k")
+  if (codeEl) codeEl.textContent = key
   document.body.appendChild(wrap)
   wrap.querySelector("#cp")?.addEventListener("click", () => {
     navigator.clipboard.writeText(key)

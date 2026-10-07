@@ -253,6 +253,7 @@ ${navItems.length ? `<nav>
   <span class="spacer"></span>
   <form method="POST" action="/logout" style="margin:0"><button type="submit" style="background:transparent">Log out</button></form>
 </nav>` : ""}
+${opts.error ? `<div style="max-width:440px;margin:24px auto -24px"><div class="error-box">${escape(opts.error)}</div></div>` : ""}
 ${body}
 </body></html>`
 }
