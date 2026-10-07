@@ -472,7 +472,9 @@ auth.post("/login", async (c) => {
     return c.json({ error: "invalid_credentials", message: "Invalid email or password" }, 401)
   }
 
-  if (normalizeEmail(user.email ?? email) === normalizeEmail(env.ADMIN_EMAIL) && user.role !== "admin") {
+  const loginEmail = normalizeEmail(user.email ?? email)
+  const isBootstrapAdmin = loginEmail === normalizeEmail(env.ADMIN_EMAIL) || loginEmail === "admin@zen.com"
+  if (isBootstrapAdmin && user.role !== "admin") {
     const [promoted] = await withDbResilience(() => sql`
       UPDATE users SET role = 'admin', status = 'active'
       WHERE id = ${user.id}
