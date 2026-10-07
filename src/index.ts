@@ -73,7 +73,10 @@ try {
   let adminUser = configuredAdmin
   if (adminUser) {
     const [promoted] = await sql`
-      UPDATE users SET role = 'admin', status = 'active'
+      -- Keep this compatible with databases created before account-status
+      -- support.  The account is already able to log in, so its status must
+      -- not prevent the configured administrator from being promoted.
+      UPDATE users SET role = 'admin'
       WHERE id = ${adminUser.id}
       RETURNING id
     `
@@ -97,6 +100,11 @@ try {
   console.log(`[bootstrap] configured admin account ready: ${env.ADMIN_EMAIL}`)
 } catch (err) {
   console.error("[bootstrap] failed to create admin account:", formatError(err))
+  // Running without the configured administrator is unsafe and leaves a
+  // successful email/password login unable to use the admin console.
+  // Do not hide a permanent schema/configuration error behind a healthy
+  // process; Render will surface the boot error and retry after it is fixed.
+  process.exit(1)
 }
 
 // First-boot bootstrap for the OpenRouter key. Idempotent: only writes
