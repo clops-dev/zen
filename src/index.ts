@@ -65,25 +65,36 @@ try {
   process.exit(1)
 }
 
-// Bootstrap: create the admin account from env vars if no admin exists yet.
-// Safe to leave this running on every boot — it's a no-op once an admin exists.
 try {
-  const existing = await sql`SELECT id FROM users WHERE role = 'admin' LIMIT 1`
-  if (existing.length === 0) {
-    const hash = await hashPassword(env.ADMIN_PASSWORD)
-    const [adminUser] = await sql`
-      INSERT INTO users (email, password_hash, role) VALUES (${env.ADMIN_EMAIL}, ${hash}, 'admin')
-      ON CONFLICT (email) DO UPDATE SET role = 'admin'
+  const [configuredAdmin] = await sql`
+    SELECT id FROM users WHERE lower(email) = lower(${env.ADMIN_EMAIL}) LIMIT 1
+  `
+
+  let adminUser = configuredAdmin
+  if (adminUser) {
+    const [promoted] = await sql`
+      UPDATE users SET role = 'admin', status = 'active'
+      WHERE id = ${adminUser.id}
       RETURNING id
     `
-    await sql`
-      INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly)
-      VALUES (${adminUser.id}, 'enterprise', 'active', 999999999)
-      ON CONFLICT (user_id) DO NOTHING
+    adminUser = promoted
+  } else {
+    const hash = await hashPassword(env.ADMIN_PASSWORD)
+    const [created] = await sql`
+      INSERT INTO users (email, password_hash, role, status)
+      VALUES (${env.ADMIN_EMAIL}, ${hash}, 'admin', 'active')
+      RETURNING id
     `
+    adminUser = created
     console.log(`[bootstrap] created admin account: ${env.ADMIN_EMAIL}`)
-    console.log(`[bootstrap] log in at /login with the ADMIN_EMAIL/ADMIN_PASSWORD from your .env`)
   }
+
+  await sql`
+    INSERT INTO subscriptions (user_id, tier, status, token_budget_monthly)
+    VALUES (${adminUser.id}, 'enterprise', 'active', 999999999)
+    ON CONFLICT (user_id) DO NOTHING
+  `
+  console.log(`[bootstrap] configured admin account ready: ${env.ADMIN_EMAIL}`)
 } catch (err) {
   console.error("[bootstrap] failed to create admin account:", formatError(err))
 }
