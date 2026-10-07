@@ -178,12 +178,30 @@ const spaDir = path.resolve(here, "..", "admin", "dist")
 // ---------------------------------------------------------------------------
 const zencodeSpaDir = path.resolve(here, "..", "zencode", "dist")
 
+function assetContentType(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase()
+  if (extension === ".js") return "application/javascript; charset=utf-8"
+  if (extension === ".css") return "text/css; charset=utf-8"
+  if (extension === ".json") return "application/json; charset=utf-8"
+  if (extension === ".svg") return "image/svg+xml"
+  if (extension === ".png") return "image/png"
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg"
+  if (extension === ".webp") return "image/webp"
+  if (extension === ".woff") return "font/woff"
+  if (extension === ".woff2") return "font/woff2"
+  return "application/octet-stream"
+}
+
+function serveAsset(filePath: string): Response {
+  return new Response(Bun.file(filePath), { headers: { "content-type": assetContentType(filePath) } })
+}
+
 if (existsSync(zencodeSpaDir) && statSync(zencodeSpaDir).isDirectory()) {
   app.get("/zencode/assets/*", (c) => {
     const rel = c.req.path.replace(/^\/zencode\//, "")
     const filePath = path.join(zencodeSpaDir, rel)
     if (!filePath.startsWith(zencodeSpaDir)) return c.text("forbidden", 403)
-    return new Response(Bun.file(filePath))
+    return serveAsset(filePath)
   })
 
   const zencodeIndex = Bun.file(path.join(zencodeSpaDir, "index.html"))
@@ -212,7 +230,7 @@ if (existsSync(spaDir) && statSync(spaDir).isDirectory()) {
     const rel = c.req.path.replace(/^\/admin2\//, "")
     const filePath = path.join(spaDir, rel)
     if (!filePath.startsWith(spaDir)) return c.text("forbidden", 403)
-    return new Response(Bun.file(filePath))
+    return serveAsset(filePath)
   })
 
   // SPA fallback. Hono's wildcard pattern is `/*` (slash-asterisk), not
