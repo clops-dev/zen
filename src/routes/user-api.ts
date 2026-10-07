@@ -45,6 +45,7 @@ import {
   isValidPackage,
   DT_PER_USD,
   getUserBillingSummary,
+  canSeeBalance,
 } from "../lib/credits"
 
 export const userApi = new Hono()
@@ -95,38 +96,27 @@ userApi.get("/me", async (c) => {
   const u = rows[0] as any
 
   const billing = await getUserBillingSummary(userId)
+  const visible = await canSeeBalance(userId)
 
   return c.json({
-    id: u.id,
-    email: u.email,
-    avatar_url: u.avatar_url ?? null,
-    created_at: u.created_at,
-    status: "active",
-    active_key_count: Number(u.active_key_count ?? 0),
-    total_key_count: Number(u.total_key_count ?? 0),
-    // Single Source of Truth Billing Data
-    total_credits_purchased: billing.total_credits_purchased,
-    total_credits_purchased_dt: billing.total_credits_purchased_dt,
-    total_usage_cost: billing.total_usage_cost,
-    remaining_credits: billing.remaining_credits,
-    remaining_credits_dt: billing.remaining_credits_dt,
-    total_requests: billing.total_requests,
-    input_tokens: billing.input_tokens,
-    output_tokens: billing.output_tokens,
-    total_tokens: billing.total_tokens,
-    // Backward compatibility helpers
-    credit_balance_dt: billing.remaining_credits_dt,
-    credit_balance_usd_value: billing.remaining_credits,
-    has_credits: billing.remaining_credits > 0,
-    welcome_display_usd: billing.welcome_display_usd,
-    has_purchased_credits: billing.has_purchased_credits,
+    id: u.id, email: u.email, avatar_url: u.avatar_url ?? null, created_at: u.created_at,
+    status: "active", active_key_count: Number(u.active_key_count ?? 0), total_key_count: Number(u.total_key_count ?? 0),
+    ...(visible ? {
+      total_credits_purchased: billing.total_credits_purchased, total_credits_purchased_dt: billing.total_credits_purchased_dt,
+      total_usage_cost: billing.total_usage_cost, remaining_credits: billing.remaining_credits, remaining_credits_dt: billing.remaining_credits_dt,
+      credit_balance_dt: billing.remaining_credits_dt, credit_balance_usd_value: billing.remaining_credits,
+      has_credits: billing.remaining_credits > 0,
+    } : { trial_status: billing.total_usage_cost > 0 ? "Free trial used up" : "Free trial: active", trial_cta: "Add credits to continue" }),
+    total_requests: billing.total_requests, input_tokens: billing.input_tokens, output_tokens: billing.output_tokens, total_tokens: billing.total_tokens,
+    ...(visible ? { has_purchased_credits: billing.has_purchased_credits } : { balance_visible: false }),
   })
 })
 
 userApi.get("/billing/summary", async (c) => {
   const { userId } = c.var.session
   const billing = await getUserBillingSummary(userId)
-  return c.json(billing)
+  if (await canSeeBalance(userId)) return c.json(billing)
+  return c.json({ userId, trial_status: billing.total_usage_cost > 0 ? "Free trial used up" : "Free trial: active", trial_cta: "Add credits to continue", total_requests: billing.total_requests, input_tokens: billing.input_tokens, output_tokens: billing.output_tokens, total_tokens: billing.total_tokens })
 })
 
 // ---------------------------------------------------------------------------
@@ -231,13 +221,10 @@ userApi.get("/usage", async (c) => {
     ORDER BY month ASC
   `)
 
+  const visible = await canSeeBalance(userId)
   return c.json(rows.map((r: any) => ({
-    month: r.month,
-    input_tokens: Number(r.total_input_tokens),
-    output_tokens: Number(r.total_output_tokens),
-    cached_tokens: Number(r.total_cached_tokens),
-    cost_usd: Number(r.total_cost_usd),
-    request_count: Number(r.request_count),
+    month: r.month, input_tokens: Number(r.total_input_tokens), output_tokens: Number(r.total_output_tokens), cached_tokens: Number(r.total_cached_tokens),
+    ...(visible ? { cost_usd: Number(r.total_cost_usd) } : {}), request_count: Number(r.request_count),
   })))
 })
 
@@ -264,12 +251,10 @@ userApi.get("/usage/daily", async (c) => {
     ORDER BY day ASC
   `)
 
+  const visible = await canSeeBalance(userId)
   return c.json(rows.map((r: any) => ({
-    day: r.day,
-    request_count: Number(r.request_count),
-    input_tokens: Number(r.input_tokens),
-    output_tokens: Number(r.output_tokens),
-    cost_usd: Number(r.cost_usd),
+    day: r.day, request_count: Number(r.request_count), input_tokens: Number(r.input_tokens), output_tokens: Number(r.output_tokens),
+    ...(visible ? { cost_usd: Number(r.cost_usd) } : {}),
   })))
 })
 
@@ -470,6 +455,7 @@ userApi.post("/mfa/disable", async (c) => {
 
 userApi.get("/credits", async (c) => {
   const { userId } = c.var.session
+  if (!(await canSeeBalance(userId))) return c.json({ trial_status: "Free trial: active", trial_cta: "Add credits to continue" })
   const balance = await getBalance(userId)
   return c.json(balance)
 })
@@ -481,6 +467,7 @@ userApi.get("/credits", async (c) => {
 userApi.get("/credits/history", async (c) => {
   const { userId } = c.var.session
   const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 50)))
+  if (!(await canSeeBalance(userId))) return c.json({ trial_status: "Free trial: active", trial_cta: "Add credits to continue", transactions: [] })
   const txs = await getTransactionHistory(userId, limit)
   return c.json(txs)
 })
@@ -514,7 +501,6 @@ userApi.post("/credits/purchase-intent", async (c) => {
   return c.json({
     transaction_id: result.transaction_id,
     amount_dt,
-    usd_value: usdValue,
     status: "pending",
     payment_ref: null,
     message: "Purchase intent recorded. Connect a payment provider to complete the transaction.",
@@ -545,6 +531,7 @@ userApi.post("/credits/purchase", async (c) => {
   })
 
   const currentSummary = await getUserBillingSummary(userId)
+  const visible = await canSeeBalance(userId)
 
   return c.json({
     ok: true,
@@ -554,11 +541,9 @@ userApi.post("/credits/purchase", async (c) => {
       transaction_id: result.transaction_id,
       date: new Date().toISOString(),
       amount_paid_dt: amount_dt,
-      credits_added_usd: creditsAddedUsd,
-      previous_balance_usd: prevBalanceUsd,
-      new_balance_usd: prevBalanceUsd,
+      ...(visible ? { credits_added_usd: creditsAddedUsd, previous_balance_usd: prevBalanceUsd, new_balance_usd: prevBalanceUsd } : {}),
       status: "pending",
     },
-    billing: currentSummary,
+    billing: visible ? currentSummary : { trial_status: "Free trial: active", trial_cta: "Add credits to continue" },
   }, 201)
 })

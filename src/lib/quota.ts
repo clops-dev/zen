@@ -21,6 +21,19 @@ export function monthStart(): Date {
  * Subscriptions have been removed — access depends ONLY on available credit balance.
  */
 export async function checkQuota(userId: string, estimatedCostUsd = 0.0001): Promise<QuotaStatus> {
+  const userRows = await withDbResilience(() => sql`
+    SELECT credits_frozen, credits_freeze_reason FROM users WHERE id = ${userId} LIMIT 1
+  `).catch(() => [])
+
+  if (userRows[0]?.credits_frozen) {
+    return {
+      allowed: false,
+      reason: "credits_frozen",
+      remainingUsd: 0,
+      maxComplexityTier: "trivial",
+    }
+  }
+
   const summary = await getUserBillingSummary(userId)
   const remainingUsd = summary.remaining_credits
 

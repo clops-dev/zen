@@ -27,22 +27,15 @@ export const DashboardPage = () => {
     );
   }
 
-  const usage = getCreditUsage({
-    totalCredits: user.total_credits_purchased,
-    usedCredits: user.total_usage_cost,
-    remainingCredits: user.remaining_credits,
-    paid: user.has_purchased_credits,
-  });
-  const color = usage.percentage >= 95
-    ? 'bg-red-500'
-    : usage.percentage >= 80
-      ? 'bg-yellow-400'
-      : 'bg-brand';
-  const textColor = usage.percentage >= 95
-    ? 'text-red-400'
-    : usage.percentage >= 80
-      ? 'text-yellow-400'
-      : 'text-brand';
+  const paid = user.balance_visible === true || user.has_purchased_credits === true;
+  const usage = paid ? getCreditUsage({
+    totalCredits: user.total_credits_purchased ?? 0,
+    usedCredits: user.total_usage_cost ?? 0,
+    remainingCredits: user.remaining_credits ?? 0,
+    paid: true,
+  }) : null;
+  const color = usage && usage.percentage >= 95 ? 'bg-red-500' : usage && usage.percentage >= 80 ? 'bg-yellow-400' : 'bg-brand';
+  const textColor = usage && usage.percentage >= 95 ? 'text-red-400' : usage && usage.percentage >= 80 ? 'text-yellow-400' : 'text-brand';
 
   return (
     <div className="space-y-6">
@@ -53,29 +46,18 @@ export const DashboardPage = () => {
 
       <Card accent className="p-6 scanlines">
         <div className="flex items-center justify-between gap-4">
-          <span className="text-xs font-bold tracking-widest uppercase text-fg">Your included usage</span>
-          <span className={`text-sm font-mono font-bold ${textColor}`}>
-            {usage.percentage.toFixed(0)}% used
-          </span>
+          <span className="text-xs font-bold tracking-widest uppercase text-fg">{paid ? 'Credit usage' : (user.trial_status ?? 'Free trial: active')}</span>
+          {usage && <span className={`text-sm font-mono font-bold ${textColor}`}>{usage.percentage.toFixed(0)}% used</span>}
         </div>
 
-        <div
-          className="mt-5 h-3 bg-bg-subtle border border-border rounded overflow-hidden"
-          role="progressbar"
-          aria-label="Included credit usage"
-          aria-valuenow={usage.percentage}
-          aria-valuemin={0}
-          aria-valuemax={100}
-        >
+        {usage ? <div className="mt-5 h-3 bg-bg-subtle border border-border rounded overflow-hidden" role="progressbar" aria-label="Credit usage" aria-valuenow={usage.percentage} aria-valuemin={0} aria-valuemax={100}>
           <div className={`h-full transition-all duration-500 ${color}`} style={{ width: `${usage.percentage}%` }} />
-        </div>
+        </div> : <p className="mt-5 text-sm text-fg-muted">{user.trial_status ?? 'Free trial: active'}</p>}
 
-        {usage.paid && (
-          <div className="mt-4 flex items-center justify-between gap-4 text-sm">
-            <span className="text-fg-muted">Remaining credits</span>
-            <span className="font-mono font-bold text-fg">{formatUsd(usage.remainingCredits)} remaining</span>
-          </div>
-        )}
+        {usage ? <div className="mt-4 flex items-center justify-between gap-4 text-sm">
+          <span className="text-fg-muted">Remaining credits</span>
+          <span className="font-mono font-bold text-fg">{formatUsd(usage.remainingCredits)} remaining</span>
+        </div> : <p className="mt-4 text-sm text-fg-muted">{user.trial_cta ?? 'Add credits to continue'}</p>}
 
         {refreshError && <p className="mt-4 text-xs text-fg-muted">Live usage updates are temporarily unavailable.</p>}
 

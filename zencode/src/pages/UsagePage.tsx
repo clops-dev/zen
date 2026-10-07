@@ -62,7 +62,7 @@ export const UsagePage = () => {
     const requests = item?.request_count ?? 0;
     const inputTokens = item?.input_tokens ?? 0;
     const outputTokens = item?.output_tokens ?? 0;
-    const costUsd = item?.cost_usd ?? 0;
+    const costUsd = user?.has_purchased_credits ? (item?.cost_usd ?? 0) : 0;
 
     totalRequests += requests;
     totalInputTokens += inputTokens;
@@ -86,40 +86,19 @@ export const UsagePage = () => {
   const maxRequests = Math.max(1, ...chartSeries.map((d) => d.requests));
 
   // Single source of truth billing fields
+  const paid = user?.balance_visible === true || user?.has_purchased_credits === true;
   const remainingUsd = user?.remaining_credits ?? 0;
-  const remainingDt = user?.remaining_credits_dt ?? (remainingUsd * 3);
+  const remainingDt = user?.remaining_credits_dt ?? 0;
   const purchasedUsd = user?.total_credits_purchased ?? 0;
   const usageCostUsd = user?.total_usage_cost ?? totalCostUsd;
 
   const stats = [
-    {
-      label: 'Total Requests',
-      value: formatNumber(user?.total_requests ?? totalRequests),
-      subtext: `All-time requests`,
-      icon: Activity,
-      color: 'text-brand',
-    },
-    {
-      label: 'Total Tokens',
-      value: formatTokens(user?.total_tokens ?? totalTokens),
-      subtext: `${formatTokens(user?.input_tokens ?? totalInputTokens)} in · ${formatTokens(user?.output_tokens ?? totalOutputTokens)} out`,
-      icon: Coins,
-      color: 'text-brand',
-    },
-    {
-      label: 'Total Usage Cost',
-      value: `$${usageCostUsd.toFixed(6)}`,
-      subtext: 'Real model pricing',
-      icon: DollarSign,
-      color: 'text-brand',
-    },
-    {
-      label: 'Remaining Credits',
-      value: `$${remainingUsd.toFixed(6)}`,
-      subtext: `≈ ${remainingDt.toFixed(2)} DT`,
-      icon: Zap,
-      color: 'text-brand',
-    },
+    { label: 'Total Requests', value: formatNumber(user?.total_requests ?? totalRequests), subtext: 'All-time requests', icon: Activity, color: 'text-brand' },
+    { label: 'Total Tokens', value: formatTokens(user?.total_tokens ?? totalTokens), subtext: `${formatTokens(user?.input_tokens ?? totalInputTokens)} in · ${formatTokens(user?.output_tokens ?? totalOutputTokens)} out`, icon: Coins, color: 'text-brand' },
+    ...(paid ? [
+      { label: 'Total Usage Cost', value: `$${usageCostUsd.toFixed(6)}`, subtext: 'Real model pricing', icon: DollarSign, color: 'text-brand' },
+      { label: 'Remaining Credits', value: `$${remainingUsd.toFixed(6)}`, subtext: `≈ ${remainingDt.toFixed(2)} DT`, icon: Zap, color: 'text-brand' },
+    ] : [{ label: 'Free trial', value: user?.trial_status ?? 'Free trial: active', subtext: user?.trial_cta ?? 'Add credits to continue', icon: Zap, color: 'text-brand' }]),
   ];
 
   return (
@@ -150,22 +129,11 @@ export const UsagePage = () => {
         </div>
       </div>
 
-      {/* Remaining Credits Card */}
       <Card accent className="p-5 scanlines">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <Zap size={14} className="text-brand" />
-              <span className="text-xs font-bold uppercase tracking-wider">Available AI Credits</span>
-            </div>
-            <div className="flex items-baseline gap-3 pt-1">
-              <span className="text-3xl font-bold font-mono">
-                ${remainingUsd.toFixed(6)} <span className="text-brand text-lg font-bold">({remainingDt.toFixed(2)} DT)</span>
-              </span>
-            </div>
-            <p className="text-[11px] text-fg-muted">
-              Purchased: ${purchasedUsd.toFixed(2)} · Usage: ${usageCostUsd.toFixed(6)} · Remaining: ${remainingUsd.toFixed(6)}
-            </p>
+            <div className="flex items-center gap-2"><Zap size={14} className="text-brand" /><span className="text-xs font-bold uppercase tracking-wider">{paid ? 'Available AI Credits' : 'Free trial'}</span></div>
+            {paid ? <><div className="flex items-baseline gap-3 pt-1"><span className="text-3xl font-bold font-mono">${remainingUsd.toFixed(6)} <span className="text-brand text-lg font-bold">({remainingDt.toFixed(2)} DT)</span></span></div><p className="text-[11px] text-fg-muted">Purchased: ${purchasedUsd.toFixed(2)} · Usage: ${usageCostUsd.toFixed(6)} · Remaining: ${remainingUsd.toFixed(6)}</p></> : <p className="text-lg font-bold pt-1">{user?.trial_status ?? 'Free trial: active'}</p>}
           </div>
           <Link
             to="/app/credits"
@@ -293,7 +261,7 @@ export const UsagePage = () => {
               </Tr>
             ) : (
               dailyData.map((d) => {
-                const costUsd = d.cost_usd ?? 0;
+                const costUsd = d.cost_usd;
                 return (
                   <Tr key={d.day}>
                     <Td>
@@ -307,7 +275,7 @@ export const UsagePage = () => {
                     <Td align="right" className="font-mono">{formatTokens(d.input_tokens)}</Td>
                     <Td align="right" className="font-mono">{formatTokens(d.output_tokens)}</Td>
                     <Td align="right" className="text-brand font-mono font-bold">
-                      ${costUsd.toFixed(6)}
+                      {paid ? `$${(costUsd ?? 0).toFixed(6)}` : '—'}
                     </Td>
                   </Tr>
                 );

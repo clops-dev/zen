@@ -11,6 +11,7 @@ import {
   Wallet,
   CreditCard,
   ShieldCheck,
+  ShieldAlert,
   ScrollText,
   Settings as SettingsIcon,
 } from "lucide-react"
@@ -29,13 +30,14 @@ const items: readonly NavItem[] = [
   { to: "/wallet", label: "Wallet", icon: Wallet },
   { to: "/requests", label: "Requests", icon: GitBranch },
   { to: "/users", label: "Users", icon: Users },
+  { to: "/suspicious", label: "Suspicious", icon: ShieldAlert },
   { to: "/audit", label: "Audit Logs", icon: ScrollText },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ]
 
 const group1 = ["Overview"]
 const group2 = ["Providers", "Models", "Routing", "Combos", "API Keys"]
-const group3 = ["Payments", "Wallet", "Requests", "Users", "Audit Logs", "Settings"]
+const group3 = ["Payments", "Wallet", "Requests", "Users", "Suspicious", "Audit Logs", "Settings"]
 
 export function Sidebar() {
   return (

@@ -40,6 +40,16 @@ import {
   canonicalEmailAlreadyGranted,
   recordWelcomeGrant,
 } from "../lib/auth-rate-limit"
+import {
+  scoreSignup,
+  markSignalGranted,
+  checkTombstone,
+  abuseHash,
+  verifyTurnstileToken,
+  recordLoginSignal,
+  markEmailVerifiedSignal,
+  reevaluateDeviceSignal,
+} from "../lib/abuse-signals"
 
 export const auth = new Hono()
 
@@ -106,7 +116,7 @@ auth.post("/signup", async (c) => {
   const email = normalizeEmail(parsed.data.email)
   const { password } = parsed.data
 
-  // --- Disposable email block ---
+  // --- Disposable email block (also handled by risk scorer, but reject immediately) ---
   if (isDisposableDomain(email)) {
     await audit({
       action: "abuse.disposable_email_attempt",
@@ -192,10 +202,55 @@ auth.post("/signup", async (c) => {
     ON CONFLICT (user_id) DO NOTHING
   `)
 
+  // --- Risk scoring (layered abuse detection) ---
+  const deviceId = c.req.header("x-zen-device-id") ?? undefined
+  const fingerprintRaw = c.req.header("x-zen-fingerprint") ?? undefined
+
+  const risk = await scoreSignup(
+    { ip, deviceId, fingerprintRaw, canonicalEmail: canonical, isDisposable: false },
+    newUser.id,
+    reqId,
+  )
+
+  // High risk → block signup with generic error (never reveal which signal matched)
+  if (risk.level === "high") {
+    // Rollback: delete the just-created user row (best-effort)
+    await withDbResilience(() => sql`DELETE FROM users WHERE id = ${newUser!.id}`).catch(() => {})
+    await audit({
+      actorId: newUser.id,
+      actorEmail: email,
+      action: "abuse.high_risk_signup_blocked",
+      resource: "abuse",
+      ip,
+      requestId: reqId,
+      result: "denied",
+      metadata: { score: risk.score, signals: risk.signals, canonical },
+    })
+    // Generic error — never say which signal matched
+    return c.json({ error: "invalid_request", message: "Unable to create account. Please contact support if you believe this is an error." }, 400)
+  }
+
+  // Medium risk → Turnstile CAPTCHA required
+  if (risk.level === "medium") {
+    const turnstileToken = typeof body?.turnstile_token === "string" ? body.turnstile_token : ""
+    if (turnstileToken) {
+      const captchaOk = await verifyTurnstileToken(turnstileToken, ip)
+      if (!captchaOk) {
+        return c.json({ error: "captcha_required", message: "Please complete the security challenge.", captcha_required: true }, 400)
+      }
+    } else if (process.env.TURNSTILE_SECRET_KEY) {
+      // CAPTCHA required and not provided
+      return c.json({ error: "captcha_required", message: "Please complete the security challenge.", captcha_required: true }, 400)
+    }
+  }
+
   // --- Anomaly flag: many signups from one IP ---
   const grantOk = await canGrantWelcomeCredit(ip)
   const canonicalAlreadyGranted = await canonicalEmailAlreadyGranted(canonical)
-  const willGrantWelcome = grantOk && !canonicalAlreadyGranted
+  // Also check tombstones (survives account deletion)
+  const deviceTombstone = risk.deviceAlreadyGranted
+  const emailTombstone = risk.emailAlreadyGranted
+  const willGrantWelcome = grantOk && !canonicalAlreadyGranted && !deviceTombstone && !emailTombstone && risk.level === "low"
 
   // --- Issue email verification token and "send" it ---
   const verifyToken = await issueEmailVerificationToken(newUser.id)
@@ -219,7 +274,7 @@ auth.post("/signup", async (c) => {
     resource: "auth",
     ip,
     requestId: reqId,
-    metadata: { canonical, will_grant_welcome: willGrantWelcome },
+    metadata: { canonical, will_grant_welcome: willGrantWelcome, risk_level: risk.level, risk_score: risk.score },
   })
 
   // Abuse check: >5 signups from same IP in 1 h
@@ -239,11 +294,17 @@ auth.post("/signup", async (c) => {
     })
   }
 
-  return c.json({
+  const response: Record<string, unknown> = {
     message: "account created",
     email_verification_required: true,
-    // welcome_bonus_display_usd is NOT included — only granted after email verification
-  })
+  }
+  // Medium risk: tell the user they can unlock the free trial
+  if (risk.level === "medium") {
+    response.welcome_credit_pending = true
+    response.message = "account created — verify your phone or add a payment method to unlock the free trial."
+  }
+
+  return c.json(response)
 })
 
 // ---------------------------------------------------------------------------
@@ -276,6 +337,7 @@ auth.post("/verify-email", async (c) => {
   await withDbResilience(() => sql`
     UPDATE users SET email_verified = true WHERE id = ${userId}
   `)
+  await markEmailVerifiedSignal(userId)
 
   // Grant welcome credits now — but only if dedup checks pass
   const userRows = await withDbResilience(() => sql`
@@ -286,12 +348,18 @@ auth.post("/verify-email", async (c) => {
     const normalizedCanonical = canonical_email ?? canonicalEmail(email)
     const grantOk = await canGrantWelcomeCredit(ip)
     const canonicalAlreadyGranted = await canonicalEmailAlreadyGranted(normalizedCanonical)
+    // Hard cap: check tombstones (survive account deletion)
+    const emailTombstone = await checkTombstone("email", abuseHash(normalizedCanonical))
+    const deviceId = c.req.header("x-zen-device-id") ?? undefined
+    const deviceTombstone = deviceId ? await checkTombstone("device", abuseHash(deviceId)) : false
 
-    if (grantOk && !canonicalAlreadyGranted) {
+    if (grantOk && !canonicalAlreadyGranted && !emailTombstone && !deviceTombstone) {
       await addCredits(userId, WELCOME_CREDITS_DT, "admin_grant", "completed", {
         adminNote: `Welcome bonus: ${WELCOME_CREDITS_DT} DT granted after email verification`,
       })
       await recordWelcomeGrant(userId, normalizedCanonical, ip)
+      // Record tombstones so future re-registration cannot re-qualify
+      await markSignalGranted(userId, normalizedCanonical, deviceId)
 
       await audit({
         actorId: userId,
@@ -312,7 +380,7 @@ auth.post("/verify-email", async (c) => {
         ip,
         requestId: reqId,
         metadata: {
-          reason: !grantOk ? "ip_limit_exceeded" : "canonical_email_duplicate",
+          reason: !grantOk ? "ip_limit_exceeded" : emailTombstone ? "email_tombstone" : deviceTombstone ? "device_tombstone" : "canonical_email_duplicate",
           canonical: normalizedCanonical,
         },
       })
@@ -476,6 +544,15 @@ auth.post("/login", async (c) => {
 
   const session = await issueSession(user.id, activeUser.role, { ip, ua: c.req.header("user-agent") })
   setSessionCookie(c, session.token, activeUser.role)
+
+  // Abuse signal tracking on login
+  const deviceId = c.req.header("x-zen-device-id") ?? undefined
+  const fingerprintRaw = c.req.header("x-zen-fingerprint") ?? undefined
+  const userCanonical = canonicalEmail(activeUser.email)
+  await recordLoginSignal(user.id, userCanonical, ip, deviceId, fingerprintRaw)
+  if (deviceId) {
+    await reevaluateDeviceSignal(user.id, deviceId, reqId)
+  }
 
   await audit({
     actorId: user.id,

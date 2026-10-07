@@ -148,10 +148,17 @@ export type User = {
   id: string
   email: string
   role: "admin" | "user"
+  status: string
+  tier: string
+  subscription_status: string
   created_at: string
+  email_verified: boolean
   active_keys: number
   last_login_at: string | null
-  // Single Source of Truth Billing Fields
+  last_active_at: string | null
+  risk_score: number
+  risk_level: string
+  risk_flags: string
   credits_purchased: number
   credits_purchased_dt: number
   usage_cost: number
@@ -283,7 +290,24 @@ export const importCombo = (body: any) => request<{ id: string; slug: string }>(
 export const testCombo = (id: string) => request<{ results: { provider: string; ok: boolean; status: number; latency_ms: number }[] }>(`/admin-api/combos/${id}/test`, { method: "POST" })
 export const deleteCombo = (id: string) => request<{ ok: true }>(`/admin-api/combos/${id}`, { method: "DELETE" })
 
-export const listUsers = () => request<{ users: User[] }>("/admin-api/users")
+export type UserListResponse = { users: User[]; next_cursor: string | null; has_more: boolean; new_last_24h: number }
+
+export type UserListParams = {
+  cursor?: string | null
+  order?: "asc" | "desc"
+  search?: string
+  plan?: "free" | "paid"
+  status?: string
+}
+
+export const listUsers = (params: UserListParams = {}) => {
+  const query = new URLSearchParams({ sort: "created_at", order: params.order ?? "desc", limit: "50" })
+  if (params.cursor) query.set("cursor", params.cursor)
+  if (params.search) query.set("search", params.search)
+  if (params.plan) query.set("plan", params.plan)
+  if (params.status) query.set("status", params.status)
+  return request<UserListResponse>(`/admin-api/users?${query}`)
+}
 export const createUser = (body: any) => request<{ id: string }>("/admin-api/users", { method: "POST", body: JSON.stringify(body) })
 export const updateUser = (id: string, body: any) => request<{ ok: true }>(`/admin-api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) })
 export const deleteUser = (id: string) => request<{ ok: true }>(`/admin-api/users/${id}`, { method: "DELETE" })
@@ -449,3 +473,32 @@ export const rejectPaymentDemand = (id: string, note?: string) =>
       body: JSON.stringify({ note }),
     }
   )
+
+export interface FlaggedAccount {
+  id: string
+  user_id: string
+  email: string
+  canonical_email: string | null
+  user_status: string
+  credits_frozen: boolean
+  credits_freeze_reason: string | null
+  flag_reason: string
+  risk_score: number
+  risk_level: "low" | "medium" | "high"
+  signals: Record<string, any>
+  status: "pending" | "approved" | "frozen" | "suspended"
+  reviewed_by: string | null
+  reviewed_at: string | null
+  created_at: string
+}
+
+/** List flagged/suspicious accounts for anti-abuse review. */
+export const listFlaggedAccounts = () =>
+  request<{ flagged_accounts: FlaggedAccount[] }>("/admin-api/flagged-accounts")
+
+/** Perform admin action on a flagged account (approve, freeze credits, suspend). */
+export const actOnFlaggedAccount = (userId: string, action: "approve" | "freeze_credits" | "suspend") =>
+  request<{ success: boolean; action: string }>(`/admin-api/flagged-accounts/${userId}/action`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  })

@@ -17,6 +17,7 @@ import { PaymentsPage } from "./pages/Payments"
 import { UserCreditsPage } from "./pages/UserCreditsPage"
 import { WalletPage } from "./pages/Wallet"
 import { AuditPage } from "./pages/Audit"
+import { SuspiciousPage } from "./pages/Suspicious"
 import { SettingsPage } from "./pages/Settings"
 import { me } from "./api"
 import { ThemeProvider } from "./ui/Theme"
@@ -147,6 +148,7 @@ export function App() {
             <Route path="/users/:id/credits" element={<RouteBoundary><PaymentsPage /></RouteBoundary>} />
             <Route path="/wallet" element={<RouteBoundary><WalletPage /></RouteBoundary>} />
             <Route path="/audit" element={<RouteBoundary><AuditPage /></RouteBoundary>} />
+            <Route path="/suspicious" element={<RouteBoundary><SuspiciousPage /></RouteBoundary>} />
             <Route path="/settings" element={<RouteBoundary><SettingsPage /></RouteBoundary>} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Route>

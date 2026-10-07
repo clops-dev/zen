@@ -455,6 +455,19 @@ export interface UserBillingSummary {
   has_purchased_credits: boolean
 }
 
+export async function canSeeBalance(userId: string): Promise<boolean> {
+  const [row] = await withDbResilience(() => sql`
+    SELECT EXISTS (
+      SELECT 1 FROM credit_transactions
+       WHERE user_id = ${userId} AND type = 'purchase' AND status = 'completed' AND amount_dt > 0
+    ) OR EXISTS (
+      SELECT 1 FROM subscriptions
+       WHERE user_id = ${userId} AND tier <> 'free' AND status = 'active'
+    ) AS can_see_balance
+  `)
+  return Boolean(row?.can_see_balance)
+}
+
 export async function getUserBillingSummary(userId: string): Promise<UserBillingSummary> {
   const [purchasedRow] = await withDbResilience(() => sql`
     SELECT COALESCE(SUM(amount_dt), 0) AS total_dt

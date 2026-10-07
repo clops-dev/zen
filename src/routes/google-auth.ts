@@ -40,6 +40,7 @@ import {
   canonicalEmailAlreadyGranted,
   recordWelcomeGrant,
 } from "../lib/auth-rate-limit"
+import { markSignalGranted, checkTombstone, abuseHash, recordLoginSignal, reevaluateDeviceSignal } from "../lib/abuse-signals"
 import { getClientIp } from "../lib/client-ip"
 
 export const googleAuth = new Hono()
@@ -270,6 +271,8 @@ googleAuth.get("/google/callback", async (c) => {
 
   let userId: string
   let userRole: "user" | "admin" = "user"
+  const canonical = canonicalEmail(email)
+  const clientIp = getClientIp(c)
 
   try {
     // Check if user already exists by google_id
@@ -352,21 +355,25 @@ googleAuth.get("/google/callback", async (c) => {
 
         // Welcome grant: check per-IP and canonical-email dedup
         // Google signups are only granted when email_verified = true (already verified above)
-        const canonical = canonicalEmail(email)
-        const clientIp = getClientIp(c)
         const grantOk = await canGrantWelcomeCredit(clientIp)
         const canonicalDup = await canonicalEmailAlreadyGranted(canonical)
+        // Hard cap: check tombstones (survives account deletion)
+        const emailTombstone = await checkTombstone("email", abuseHash(canonical))
+        const deviceId = c.req.header("x-zen-device-id") ?? undefined
+        const deviceTombstone = deviceId ? await checkTombstone("device", abuseHash(deviceId)) : false
 
-        if (grantOk && !canonicalDup) {
+        if (grantOk && !canonicalDup && !emailTombstone && !deviceTombstone) {
           await addCredits(userId, WELCOME_CREDITS_DT, "admin_grant", "completed", {
             adminNote: `Welcome bonus: ${WELCOME_CREDITS_DT} DT granted on Google signup (email_verified=true)`,
           })
           await recordWelcomeGrant(userId, canonical, clientIp)
+          // Record tombstones so future re-registration cannot re-qualify
+          await markSignalGranted(userId, canonical, deviceId)
         } else {
           log.warn("google_signup_welcome_grant_blocked", {
             email,
             canonical,
-            reason: !grantOk ? "ip_limit_exceeded" : "canonical_email_duplicate",
+            reason: !grantOk ? "ip_limit_exceeded" : emailTombstone ? "email_tombstone" : deviceTombstone ? "device_tombstone" : "canonical_email_duplicate",
           })
         }
       }
@@ -381,6 +388,14 @@ googleAuth.get("/google/callback", async (c) => {
     // Issue session cookie
     const session = await issueSession(userId, userRole)
     setSessionCookie(c, session.token, userRole)
+
+    // Abuse signal tracking on Google login
+    const deviceId = c.req.header("x-zen-device-id") ?? undefined
+    const fingerprintRaw = c.req.header("x-zen-fingerprint") ?? undefined
+    await recordLoginSignal(userId, canonical, clientIp, deviceId, fingerprintRaw)
+    if (deviceId) {
+      await reevaluateDeviceSignal(userId, deviceId, reqId)
+    }
   } catch (err) {
     return failClosed("db_error", err)
   }

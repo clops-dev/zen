@@ -159,52 +159,109 @@ adminApi.get("/dashboard/providers/health", async (c) => {
 // ---------------------------------------------------------------------------
 
 const userListSchema = z.object({
-  q: z.string().optional(),
-  limit: z.coerce.number().int().min(1).max(500).default(100),
+  search: z.string().max(200).optional(),
+  q: z.string().max(200).optional(),
+  plan: z.enum(["free", "paid"]).optional(),
+  status: z.enum(["active", "suspended", "deleted"]).optional(),
+  sort: z.enum(["created_at"]).default("created_at"),
+  order: z.enum(["asc", "desc"]).default("desc"),
+  cursor: z.string().max(500).optional(),
+  limit: z.coerce.number().int().min(1).max(50).default(50),
 })
+
+const userSortColumns = { created_at: sql`u.created_at` } as const
+const userOrderFragments = { asc: sql`ASC`, desc: sql`DESC` } as const
+
+type UserCursor = { created_at: string; id: string }
+
+function decodeUserCursor(value: string | undefined): UserCursor | null {
+  if (!value) return null
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as UserCursor
+    if (typeof decoded.created_at !== "string" || typeof decoded.id !== "string") return null
+    return decoded
+  } catch {
+    return null
+  }
+}
+
+function encodeUserCursor(row: { created_at: unknown; id: string } | Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify({ created_at: new Date(row.created_at as string).toISOString(), id: row.id })).toString("base64url")
+}
 
 adminApi.get("/users", async (c) => {
   const parsed = userListSchema.safeParse(c.req.query())
   if (!parsed.success) return jsonError(c, 400, "invalid_query")
-  const q = parsed.data.q ?? ""
+  const cursor = decodeUserCursor(parsed.data.cursor)
+  if (parsed.data.cursor && !cursor) return jsonError(c, 400, "invalid_cursor")
+  const search = parsed.data.search ?? parsed.data.q ?? ""
   const limit = parsed.data.limit
+  const sortColumn = userSortColumns[parsed.data.sort]
+  const order = userOrderFragments[parsed.data.order]
+  const afterCursor = cursor
+    ? parsed.data.order === "desc"
+      ? sql`AND (u.created_at, u.id) < (${cursor.created_at}::timestamptz, ${cursor.id}::uuid)`
+      : sql`AND (u.created_at, u.id) > (${cursor.created_at}::timestamptz, ${cursor.id}::uuid)`
+    : sql``
   try {
     const rows = await sql`
-      SELECT u.id, u.email, u.role, u.created_at,
-             COALESCE((SELECT count(*) FROM api_keys WHERE user_id = u.id AND revoked = false), 0) AS active_keys
+      SELECT u.id, u.email, u.role, u.status, u.email_verified, u.created_at,
+             COALESCE(s.tier, 'free') AS tier,
+             COALESCE(s.status, 'active') AS subscription_status,
+             COALESCE(k.active_keys, 0) AS active_keys,
+             k.last_login_at,
+             r.last_active_at,
+             COALESCE(r.requests, 0) AS requests,
+             COALESCE(r.input_tokens, 0) AS input_tokens,
+             COALESCE(r.output_tokens, 0) AS output_tokens,
+             COALESCE(f.risk_score, 0) AS risk_score,
+             COALESCE(f.risk_level, 'low') AS risk_level,
+             COALESCE(f.flag_reason, '') AS risk_flags,
+             COALESCE(cr.purchased_dt, 0) AS credits_purchased_dt,
+             COALESCE(cr.usage_cost, 0) AS usage_cost,
+             COALESCE(cr.remaining_dt, 0) AS remaining_credits_dt
         FROM users u
-       WHERE u.email ILIKE ${"%" + q + "%"} OR u.role ILIKE ${"%" + q + "%"}
-       ORDER BY u.created_at DESC
-       LIMIT ${limit}
+        LEFT JOIN subscriptions s ON s.user_id = u.id
+        LEFT JOIN LATERAL (
+          SELECT count(*) FILTER (WHERE NOT revoked) AS active_keys, max(last_used_at) AS last_login_at
+            FROM api_keys WHERE user_id = u.id
+        ) k ON true
+        LEFT JOIN LATERAL (
+          SELECT max(created_at) AS last_active_at, count(*) AS requests,
+                 COALESCE(sum(input_tokens), 0) AS input_tokens,
+                 COALESCE(sum(output_tokens), 0) AS output_tokens
+            FROM ai_requests WHERE user_id = u.id
+        ) r ON true
+        LEFT JOIN flagged_accounts f ON f.user_id = u.id AND f.status = 'pending'
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(sum(amount_dt) FILTER (WHERE type IN ('purchase', 'admin_grant') AND status = 'completed'), 0) AS purchased_dt,
+                 COALESCE(sum(amount_dt) FILTER (WHERE type = 'usage' AND status = 'completed'), 0) / ${DT_PER_USD} AS usage_cost,
+                 COALESCE(sum(amount_dt) FILTER (WHERE status = 'completed'), 0) AS remaining_dt
+            FROM credit_transactions WHERE user_id = u.id
+        ) cr ON true
+       WHERE (${search} = '' OR u.email ILIKE ${"%" + search + "%"})
+         AND (${parsed.data.plan ? sql`COALESCE(s.tier, 'free') ${parsed.data.plan === "free" ? sql`=` : sql`<>`} 'free'` : sql`TRUE`})
+         AND (${parsed.data.status ? sql`u.status = ${parsed.data.status}` : sql`TRUE`})
+         ${afterCursor}
+       ORDER BY ${sortColumn} ${order}, u.id ${order}
+       LIMIT ${limit + 1}
     `
-    const lastLogin = await sql`SELECT user_id, max(last_used_at) AS last_used_at FROM api_keys GROUP BY user_id`
-    const lastMap = new Map(lastLogin.map((r: any) => [r.user_id, r.last_used_at]))
-
-    const userSummaries = await Promise.all(
-      rows.map(async (r: any) => {
-        const billing = await getUserBillingSummary(r.id)
-        return {
-          id: r.id,
-          email: r.email,
-          role: r.role,
-          created_at: r.created_at,
-          active_keys: Number(r.active_keys),
-          last_login_at: lastMap.get(r.id) ?? null,
-          // Single Source of Truth Billing Fields for Admin Table
-          credits_purchased: billing.total_credits_purchased,
-          credits_purchased_dt: billing.total_credits_purchased_dt,
-          usage_cost: billing.total_usage_cost,
-          remaining_credits: billing.remaining_credits,
-          remaining_credits_dt: billing.remaining_credits_dt,
-          requests: billing.total_requests,
-          input_tokens: billing.input_tokens,
-          output_tokens: billing.output_tokens,
-          tokens: billing.total_tokens,
-        }
-      })
-    )
-
-    return c.json({ users: userSummaries })
+    const hasMore = rows.length > limit
+    const pageRows = hasMore ? rows.slice(0, limit) : rows
+    const nextCursor = hasMore && pageRows.length > 0 ? encodeUserCursor(pageRows[pageRows.length - 1]) : null
+    const [countRow] = await sql`SELECT count(*) AS count FROM users WHERE created_at >= now() - interval '24 hours'`
+    const users = pageRows.map((r: any) => ({
+      id: r.id, email: r.email, role: r.role, status: r.status, tier: r.tier,
+      subscription_status: r.subscription_status, created_at: r.created_at,
+      email_verified: r.email_verified, active_keys: Number(r.active_keys),
+      last_login_at: r.last_login_at ?? null, last_active_at: r.last_active_at ?? null,
+      risk_score: Number(r.risk_score), risk_level: r.risk_level, risk_flags: r.risk_flags,
+      credits_purchased_dt: Number(r.credits_purchased_dt), usage_cost: Number(r.usage_cost),
+      remaining_credits_dt: Number(r.remaining_credits_dt), requests: Number(r.requests),
+      input_tokens: Number(r.input_tokens), output_tokens: Number(r.output_tokens),
+      tokens: Number(r.input_tokens) + Number(r.output_tokens),
+    }))
+    return c.json({ users, next_cursor: nextCursor, has_more: hasMore, new_last_24h: Number(countRow?.count ?? 0) })
   } catch (err) {
     return jsonError(c, 500, "users_list_failed", err instanceof Error ? err.message : String(err))
   }
@@ -2180,4 +2237,122 @@ adminApi.post("/payments/demands/:id/reject", async (c) => {
     return c.json({ error: "reject_failed", message: err instanceof Error ? err.message : String(err) }, 500)
   }
 })
+
+// ---------------------------------------------------------------------------
+// Flagged accounts (Suspicious accounts tab)
+// ---------------------------------------------------------------------------
+
+adminApi.get("/flagged-accounts", async (c) => {
+  try {
+    const rows = await sql`
+      SELECT f.id, f.user_id, u.email, u.canonical_email, u.status as user_status,
+             u.credits_frozen, u.credits_freeze_reason,
+             f.flag_reason, f.risk_score, f.risk_level, f.signals, f.status,
+             f.reviewed_by, f.reviewed_at, f.created_at
+      FROM flagged_accounts f
+      JOIN users u ON u.id = f.user_id
+      ORDER BY f.created_at DESC
+      LIMIT 100
+    `
+    return c.json({ flagged_accounts: rows })
+  } catch (err) {
+    return jsonError(c, 500, "flagged_accounts_failed", err instanceof Error ? err.message : String(err))
+  }
+})
+
+const flaggedActionSchema = z.object({
+  action: z.enum(["approve", "freeze_credits", "suspend"]),
+})
+
+adminApi.post("/flagged-accounts/:userId/action", async (c) => {
+  const session = c.var.session
+  const userId = c.req.param("userId")
+  const body = await c.req.json().catch(() => ({}))
+  const parsed = flaggedActionSchema.safeParse(body)
+  if (!parsed.success) return jsonError(c, 400, "invalid_action")
+
+  const action = parsed.data.action
+  const adminEmail = await actorEmailFor(session.userId)
+
+  try {
+    const [user] = await sql`SELECT id, email, status, credits_frozen FROM users WHERE id = ${userId}`
+    if (!user) return jsonError(c, 404, "user_not_found")
+
+    if (action === "approve") {
+      await sql`
+        UPDATE flagged_accounts
+        SET status = 'approved', reviewed_by = ${session.userId}, reviewed_at = now()
+        WHERE user_id = ${userId}
+      `
+      await sql`
+        UPDATE users
+        SET credits_frozen = false, credits_freeze_reason = NULL
+        WHERE id = ${userId}
+      `
+      await audit({
+        actorId: session.userId,
+        actorEmail: adminEmail,
+        action: "abuse.account_approved",
+        resource: "abuse",
+        resourceId: userId,
+        ip: ip(c),
+        metadata: { target_email: user.email },
+      })
+      return c.json({ success: true, action: "approved" })
+    }
+
+    if (action === "freeze_credits") {
+      await sql`
+        UPDATE flagged_accounts
+        SET status = 'frozen', reviewed_by = ${session.userId}, reviewed_at = now()
+        WHERE user_id = ${userId}
+      `
+      await sql`
+        UPDATE users
+        SET credits_frozen = true, credits_freeze_reason = 'admin_frozen'
+        WHERE id = ${userId}
+      `
+      await audit({
+        actorId: session.userId,
+        actorEmail: adminEmail,
+        action: "abuse.account_frozen",
+        resource: "abuse",
+        resourceId: userId,
+        ip: ip(c),
+        metadata: { target_email: user.email },
+      })
+      return c.json({ success: true, action: "frozen" })
+    }
+
+    if (action === "suspend") {
+      await sql`
+        UPDATE flagged_accounts
+        SET status = 'suspended', reviewed_by = ${session.userId}, reviewed_at = now()
+        WHERE user_id = ${userId}
+      `
+      await sql`
+        UPDATE users
+        SET status = 'suspended', credits_frozen = true, credits_freeze_reason = 'admin_suspended'
+        WHERE id = ${userId}
+      `
+      await revokeAllUserSessions(userId)
+      invalidateActiveUserCache(userId)
+      await audit({
+        actorId: session.userId,
+        actorEmail: adminEmail,
+        action: "abuse.account_suspended",
+        resource: "abuse",
+        resourceId: userId,
+        ip: ip(c),
+        metadata: { target_email: user.email },
+      })
+      return c.json({ success: true, action: "suspended" })
+    }
+
+    return jsonError(c, 400, "invalid_action")
+  } catch (err) {
+    return jsonError(c, 500, "flagged_action_failed", err instanceof Error ? err.message : String(err))
+  }
+})
+
 

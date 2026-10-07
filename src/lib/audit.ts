@@ -20,6 +20,11 @@ export type AuditAction =
   | "abuse.failed_login_spike"
   | "abuse.disposable_email_attempt"
   | "abuse.disposable_email_spike"
+  | "abuse.high_risk_signup_blocked"
+  | "abuse.device_id_collision"
+  | "abuse.account_approved"
+  | "abuse.account_frozen"
+  | "abuse.account_suspended"
   // user mgmt
   | "user.create"
   | "user.update"

@@ -30,8 +30,9 @@ export const Sidebar = ({ open, onClose }: SidebarProps) => {
     ? user.email.slice(0, 2).toUpperCase()
     : 'ZC';
 
-  const creditBalance = user?.credit_balance_dt ?? 0;
-  const hasCredits = user?.has_credits ?? false;
+  const paid = user?.balance_visible === true || user?.has_purchased_credits === true;
+  const creditBalance = paid ? (user?.credit_balance_dt ?? 0) : 0;
+  const hasCredits = paid && (user?.has_credits ?? false);
 
   const handleLogout = async () => {
     onClose();

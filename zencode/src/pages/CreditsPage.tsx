@@ -32,11 +32,12 @@ export const CreditsPage = () => {
   const [receipt, setReceipt] = useState<PaymentReceipt | null>(null);
 
   // Single Source of Truth Values from backend
+  const paid = user?.balance_visible === true || user?.has_purchased_credits === true;
   const purchasedUsd = user?.total_credits_purchased ?? 0;
   const usageUsd = user?.total_usage_cost ?? 0;
-  const remainingUsd = user?.remaining_credits ?? (purchasedUsd - usageUsd);
-  const remainingDt = user?.remaining_credits_dt ?? (remainingUsd * DT_PER_USD);
-  const hasCredits = remainingUsd > 0;
+  const remainingUsd = user?.remaining_credits ?? 0;
+  const remainingDt = user?.remaining_credits_dt ?? 0;
+  const hasCredits = paid && remainingUsd > 0;
 
   const loadHistory = useCallback(async () => {
     try {
@@ -100,16 +101,10 @@ export const CreditsPage = () => {
             <div className="text-[10px] font-bold uppercase tracking-widest text-fg-muted mb-1">
               Current Available AI Credits
             </div>
-            <div className="flex items-baseline gap-3">
-              <span className="text-5xl font-bold font-mono">
-                ${remainingUsd.toFixed(6)}
-              </span>
-              <span className="text-brand font-bold text-xl">({remainingDt.toFixed(2)} DT)</span>
-            </div>
-            <div className="text-xs text-fg-muted mt-2">
-              Purchased: <span className="text-fg font-bold">${purchasedUsd.toFixed(2)}</span> · 
-              Usage Cost: <span className="text-red-400 font-bold">${usageUsd.toFixed(6)}</span>
-            </div>
+            {paid ? <>
+              <div className="flex items-baseline gap-3"><span className="text-5xl font-bold font-mono">${remainingUsd.toFixed(6)}</span><span className="text-brand font-bold text-xl">({remainingDt.toFixed(2)} DT)</span></div>
+              <div className="text-xs text-fg-muted mt-2">Purchased: <span className="text-fg font-bold">${purchasedUsd.toFixed(2)}</span> · Usage Cost: <span className="text-red-400 font-bold">${usageUsd.toFixed(6)}</span></div>
+            </> : <div className="mt-3"><div className="text-2xl font-bold">{user?.trial_status ?? 'Free trial: active'}</div><div className="text-sm text-fg-muted mt-2">{user?.trial_cta ?? 'Add credits to continue'}</div></div>}
           </div>
 
           <div className="flex flex-col items-end gap-2">
@@ -201,6 +196,8 @@ export const CreditsPage = () => {
             <div className="p-8 text-center text-xs text-fg-muted font-mono">
               Loading transactions...
             </div>
+          ) : !paid ? (
+            <div className="p-8 text-center space-y-3"><Coins size={32} className="mx-auto text-fg-muted opacity-40" /><div className="text-sm text-fg-muted">{user?.trial_cta ?? 'Add credits to continue'}</div></div>
           ) : transactions.length === 0 ? (
             <div className="p-8 text-center space-y-3">
               <Coins size={32} className="mx-auto text-fg-muted opacity-40" />
@@ -279,12 +276,12 @@ export const CreditsPage = () => {
               </div>
               <div className="flex justify-between border-b border-border/40 pb-2">
                 <span className="text-fg-muted uppercase">Requested Amount:</span>
-                <span className="font-bold text-brand">{receipt.amount_paid_dt} DT (${receipt.credits_added_usd.toFixed(2)})</span>
+                <span className="font-bold text-brand">{receipt.amount_paid_dt} DT</span>
               </div>
-              <div className="flex justify-between border-b border-border/40 pb-2">
+              {receipt.credits_added_usd !== undefined && receipt.previous_balance_usd !== undefined && <div className="flex justify-between border-b border-border/40 pb-2">
                 <span className="text-fg-muted uppercase">Current Balance:</span>
                 <span className="text-fg-subtle">${receipt.previous_balance_usd.toFixed(6)}</span>
-              </div>
+              </div>}
               <div className="flex justify-between pt-1 text-[11px]">
                 <span className="text-fg-muted uppercase">Transaction ID:</span>
                 <span className="text-brand font-bold uppercase">{receipt.transaction_id.slice(0, 8)}…</span>

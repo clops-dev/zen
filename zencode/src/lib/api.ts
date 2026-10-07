@@ -18,23 +18,22 @@ export interface UserProfile {
   status: 'active';
   active_key_count: number;
   total_key_count: number;
-
-  // Single Source of Truth Credits & Billing Metrics
-  total_credits_purchased: number;      // USD (e.g. 5.000000)
-  total_credits_purchased_dt: number;   // DT (e.g. 15.0000)
-  total_usage_cost: number;             // USD (e.g. 0.118351)
-  remaining_credits: number;            // USD (e.g. 4.881649)
-  remaining_credits_dt: number;         // DT (e.g. 14.6449)
-  total_requests: number;               // (e.g. 46)
-  input_tokens: number;                 // (e.g. 535800)
-  output_tokens: number;                // (e.g. 4900)
-  total_tokens: number;                 // (e.g. 540700)
-
-  // Backward compatibility fields
-  credit_balance_dt: number;
-  credit_balance_usd_value: number;
-  has_credits: boolean;
-  has_purchased_credits: boolean;
+  total_requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  has_purchased_credits?: boolean;
+  balance_visible?: boolean;
+  total_credits_purchased?: number;
+  total_credits_purchased_dt?: number;
+  total_usage_cost?: number;
+  remaining_credits?: number;
+  remaining_credits_dt?: number;
+  credit_balance_dt?: number;
+  credit_balance_usd_value?: number;
+  has_credits?: boolean;
+  trial_status?: string;
+  trial_cta?: string;
 }
 
 export interface MonthlyUsage {
@@ -42,22 +41,24 @@ export interface MonthlyUsage {
   input_tokens: number;
   output_tokens: number;
   cached_tokens: number;
-  cost_usd: number;
+  cost_usd?: number;
   request_count: number;
 }
+
+export interface TrialStatus {
+  trial_status: string;
+  trial_cta: string;
+}
+
+export type CreditBalance = { balance_dt: number; balance_usd_value: number; updated_at: string } | TrialStatus;
+export type CreditTransactionResponse = CreditTransaction[] | (TrialStatus & { transactions: CreditTransaction[] });
 
 export interface DailyUsage {
   day: string;
   request_count: number;
   input_tokens: number;
   output_tokens: number;
-  cost_usd: number;
-}
-
-export interface CreditBalance {
-  balance_dt: number;
-  balance_usd_value: number;
-  updated_at: string;
+  cost_usd?: number;
 }
 
 export interface CreditTransaction {
@@ -83,9 +84,9 @@ export interface PaymentReceipt {
   transaction_id: string;
   date: string;
   amount_paid_dt: number;
-  credits_added_usd: number;
-  previous_balance_usd: number;
-  new_balance_usd: number;
+  credits_added_usd?: number;
+  previous_balance_usd?: number;
+  new_balance_usd?: number;
   status?: string;
 }
 
@@ -173,8 +174,9 @@ export const api = {
   },
 
   /** Last N credit transactions (default 50). */
-  getCreditHistory(limit = 50): Promise<CreditTransaction[]> {
-    return apiFetch<CreditTransaction[]>(`/user-api/credits/history?limit=${limit}`);
+  async getCreditHistory(limit = 50): Promise<CreditTransaction[]> {
+    const response = await apiFetch<CreditTransactionResponse>(`/user-api/credits/history?limit=${limit}`);
+    return Array.isArray(response) ? response : response.transactions;
   },
 
   /**

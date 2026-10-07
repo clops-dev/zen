@@ -17,7 +17,7 @@ import { deriveConversationKey, getAffinityStore } from "../lib/affinity"
 import { callNonStreaming, callStreaming, classifyProviderError, type StreamStartResult } from "../lib/ai-call"
 import { UpstreamTimeoutError } from "../lib/ai-call"
 import { checkQuota, recordUsage } from "../lib/quota"
-import { deductCredits, usdToDt, InsufficientCreditsError } from "../lib/credits"
+import { deductCredits, usdToDt, InsufficientCreditsError, canSeeBalance } from "../lib/credits"
 import { hashPrompt, getCached, isResponseCacheEligible, setCached } from "../lib/cache"
 import { calcCost } from "../lib/pricing"
 import { DEFAULT_GATEWAY_RATE_LIMIT_RPM, GATEWAY_RATE_LIMIT_WINDOW_MS } from "../lib/rate-limit-config"
@@ -28,6 +28,7 @@ import { log } from "../lib/logger"
 import { recordRequestMetrics, recordStageMs } from "../lib/metrics"
 import { getActiveUser } from "../lib/active-user"
 import { getClientIp } from "../lib/client-ip"
+import { reevaluateDeviceSignal } from "../lib/abuse-signals"
 
 export const gateway = new Hono()
 
@@ -342,6 +343,12 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
   const maxOutputTokens = max_tokens ?? 16384
 
   // ---------------------------------------------------------------------------
+  // Continuous abuse check: re-evaluate device collisions on use
+  const deviceId = c.req.header("x-zen-device-id") ?? undefined
+  if (deviceId) {
+    bg(reevaluateDeviceSignal(user.id, deviceId, reqId))
+  }
+
   // Credit check — user access depends strictly on available credit balance
   // ---------------------------------------------------------------------------
 
@@ -350,14 +357,16 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
   if (!quota.allowed) {
     bg(recordRequest({ userId: user.id, ip, modelLabel: "n/a", status: "rejected", rejectReason: quota.reason, requestId: reqId }))
     const statusCode = 402
-    const remainingVal = quota.remainingUsd ?? 0
-    const message = `Insufficient credits. Your current balance is $${remainingVal.toFixed(2)}. Please purchase additional credits to continue.`
+      const isFrozen = quota.reason === "credits_frozen"
+      const message = isFrozen
+        ? "Account credits are frozen due to security verification. Please contact support."
+        : "Free trial finished. Add credits to continue"
 
     const errorBody = {
       error: {
         message,
-        type: "insufficient_credits",
-        code: "insufficient_credits",
+        type: isFrozen ? "credits_frozen" : "insufficient_credits",
+        code: isFrozen ? "credits_frozen" : "insufficient_credits",
       }
     }
 

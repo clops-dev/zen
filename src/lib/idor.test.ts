@@ -145,6 +145,11 @@ describe("IDOR and Object-Level Authorization", () => {
         return [{ balance_dt: uid === userA.id ? 50 : 100, updated_at: new Date().toISOString() }]
       }
 
+      // Balance visibility rule: these fixtures represent completed purchases.
+      if (q.includes("from credit_transactions") && q.includes("select exists")) {
+        return [{ can_see_balance: true }]
+      }
+
       // Billing / credit transactions
       if (q.includes("from credit_transactions")) {
         const uid = values.find((v) => v === userA.id || v === userB.id)

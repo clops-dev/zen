@@ -1,7 +1,7 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Coins, Plus, Trash2, DollarSign, TrendingUp, Users as UsersIcon } from "lucide-react"
+import { Coins, Plus, Trash2, TrendingUp, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react"
 import { createUser, deleteUser, listUsers, getAdminBilling, type User } from "../api"
 import { Modal } from "../ui/Modal"
 import { useToast } from "../ui/Toast"
@@ -13,15 +13,14 @@ function formatTokens(n: number) {
 }
 
 export function UsersPage() {
-  const q = useQuery({ queryKey: ["users"], queryFn: listUsers })
-  const billingQ = useQuery({ queryKey: ["admin-billing"], queryFn: getAdminBilling })
-
   const [open, setOpen] = useState(false)
+  const [order, setOrder] = useState<"asc" | "desc">("desc")
+  const [cursor, setCursor] = useState<string | null>(null)
+  const q = useQuery({ queryKey: ["users", order, cursor], queryFn: () => listUsers({ order, cursor }) })
+  const billingQ = useQuery({ queryKey: ["admin-billing"], queryFn: getAdminBilling })
   const users = q.data?.users ?? []
   const billing = billingQ.data
-
-  const admins = users.filter((u: any) => u.role === "admin").length
-  const activeKeys = users.reduce((s: number, u: any) => s + Number(u.active_keys ?? 0), 0)
+  const groupedUsers = useMemo(() => groupUsers(users), [users])
 
   return (
     <div className="flex flex-col gap-4">
@@ -53,32 +52,24 @@ export function UsersPage() {
         </div>
       </div>
 
-      {/* Requirement 4: Exact User Table Columns */}
+      <div className="flex items-center justify-between gap-3 card p-3 text-xs">
+        <span className="font-semibold">{q.data?.new_last_24h ?? 0} new in the last 24 h</span>
+        <button className="btn" onClick={() => { setOrder(order === "desc" ? "asc" : "desc"); setCursor(null) }}>
+          {order === "desc" ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
+          {order === "desc" ? "Newest first" : "Oldest first"}
+        </button>
+      </div>
       <div className="card overflow-hidden">
         <table className="table-clean text-xs">
-          <thead>
-            <tr>
-              <th>Email</th>
-              <th>Role</th>
-              <th className="text-right">Purchased Credits</th>
-              <th className="text-right">Usage Cost</th>
-              <th className="text-right">Remaining Credits</th>
-              <th className="text-right">Requests</th>
-              <th className="text-right">Tokens</th>
-              <th className="text-right">Actions</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Email</th><th>Joined</th><th>Plan</th><th>Status</th><th>Risk</th><th>Last active</th><th className="text-right">Actions</th></tr></thead>
           <tbody>
-            {users.map((u: User) => (
-              <UserRow key={u.id} u={u} />
-            ))}
-            {users.length === 0 && !q.isLoading && (
-              <tr>
-                <td colSpan={8} className="text-center text-muted py-12">No users found.</td>
-              </tr>
-            )}
+            {groupedUsers.map(([label, rows]) => <UserGroup key={label} label={label} users={rows} />)}
+            {users.length === 0 && !q.isLoading && <tr><td colSpan={7} className="text-center text-muted py-12">No users found.</td></tr>}
           </tbody>
         </table>
+      </div>
+      <div className="flex justify-end">
+        <button className="btn" disabled={!q.data?.has_more || q.isFetching} onClick={() => setCursor(q.data?.next_cursor ?? null)}>Next 50</button>
       </div>
 
       <NewUserDialog open={open} onClose={() => setOpen(false)} />
@@ -99,6 +90,24 @@ function Stat({ label, value, accent }: { label: string; value: number | string;
   )
 }
 
+function groupUsers(users: User[]) {
+  const groups = new Map<string, User[]>()
+  for (const user of users) {
+    const date = new Date(user.created_at)
+    const now = new Date()
+    const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    const label = day === today ? "Today" : day === today - 86400000 ? "Yesterday" : day >= today - 6 * 86400000 ? "This week" : date.toLocaleDateString(undefined, { month: "long", year: "numeric" })
+    if (!groups.has(label)) groups.set(label, [])
+    groups.get(label)!.push(user)
+  }
+  return [...groups]
+}
+
+function UserGroup({ label, users }: { label: string; users: User[] }) {
+  return <><tr><td colSpan={7} className="bg-panel/60 text-muted font-semibold py-2">{label}</td></tr>{users.map((u) => <UserRow key={u.id} u={u} />)}</>
+}
+
 function UserRow({ u }: { u: User }) {
   const qc = useQueryClient()
   const del = useMutation({
@@ -109,54 +118,25 @@ function UserRow({ u }: { u: User }) {
     },
   })
 
-  const purchased = u.credits_purchased ?? 0
-  const usage = u.usage_cost ?? 0
-  const remaining = u.remaining_credits ?? (purchased - usage)
-  const requests = u.requests ?? 0
-  const tokens = u.tokens ?? 0
+  const joined = new Date(u.created_at)
+  const lastActive = u.last_active_at ? new Date(u.last_active_at).toLocaleString() : "Never"
 
   return (
     <tr>
+      <td><div className="font-medium text-sm">{u.email}</div><div className="text-[11px] text-muted">{u.role}</div></td>
+      <td className="whitespace-nowrap">{joined.toLocaleString()}</td>
+      <td><span className="chip chip-muted">{u.tier}</span></td>
+      <td><span className={`chip ${u.status === "active" ? "text-accent" : "text-bad"}`}>{u.status}</span></td>
       <td>
-        <div className="font-medium text-sm">{u.email}</div>
-        <div className="text-[11px] text-muted">Joined {new Date(u.created_at).toLocaleDateString()}</div>
+        <span className={u.risk_score > 0 ? "text-bad" : "text-muted"}>{u.risk_score}</span>
+        {u.risk_flags && <span className="block text-[10px] text-muted max-w-36 truncate" title={u.risk_flags}>{u.risk_flags}</span>}
       </td>
-      <td>
-        <span className={`chip ${u.role === "admin" ? "text-accent border-accent/40 bg-accent/10" : "chip-muted"}`}>
-          {u.role}
-        </span>
-      </td>
-      <td className="text-right font-mono font-semibold">
-        ${purchased.toFixed(6)}
-      </td>
-      <td className="text-right font-mono text-bad font-semibold">
-        ${usage.toFixed(6)}
-      </td>
-      <td className="text-right font-mono text-accent font-bold">
-        ${remaining.toFixed(6)}
-      </td>
-      <td className="text-right font-mono font-bold">
-        {requests}
-      </td>
-      <td className="text-right font-mono">
-        {formatTokens(tokens)}
-      </td>
+      <td className="whitespace-nowrap">{lastActive}</td>
       <td className="text-right">
         <div className="flex items-center justify-end gap-1">
-          <Link
-            to={`/payments?userId=${u.id}`}
-            className="btn-ghost"
-            title="Manage Credits & Grant Funds"
-          >
-            <Coins className="size-4 text-accent" />
-          </Link>
-          <button
-            className="btn-ghost text-bad"
-            onClick={() => confirm(`Delete user ${u.email}?`) && del.mutate()}
-            title="Delete user"
-          >
-            <Trash2 className="size-4" />
-          </button>
+          {u.email_verified && <CheckCircle2 className="size-4 text-accent" aria-label="Verified" />}
+          <Link to={`/payments?userId=${u.id}`} className="btn-ghost" title="Manage credits"><Coins className="size-4 text-accent" /></Link>
+          <button className="btn-ghost text-bad" onClick={() => confirm(`Delete user ${u.email}?`) && del.mutate()} title="Delete user"><Trash2 className="size-4" /></button>
         </div>
       </td>
     </tr>
