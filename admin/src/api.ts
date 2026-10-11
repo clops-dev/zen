@@ -499,8 +499,8 @@ export interface FlaggedAccount {
 export const listFlaggedAccounts = () =>
   request<{ flagged_accounts: FlaggedAccount[] }>("/admin-api/flagged-accounts")
 
-/** Perform admin action on a flagged account (approve, freeze credits, suspend). */
-export const actOnFlaggedAccount = (userId: string, action: "approve" | "freeze_credits" | "suspend") =>
+/** Perform an admin action on a flagged account. */
+export const actOnFlaggedAccount = (userId: string, action: "approve" | "freeze_credits" | "suspend" | "unsuspend") =>
   request<{ success: boolean; action: string }>(`/admin-api/flagged-accounts/${userId}/action`, {
     method: "POST",
     body: JSON.stringify({ action }),

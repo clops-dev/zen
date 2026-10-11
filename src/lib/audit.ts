@@ -25,6 +25,7 @@ export type AuditAction =
   | "abuse.account_approved"
   | "abuse.account_frozen"
   | "abuse.account_suspended"
+  | "abuse.account_unsuspended"
   // user mgmt
   | "user.create"
   | "user.update"

@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { listFlaggedAccounts, actOnFlaggedAccount, type FlaggedAccount } from "../api"
-import { ShieldAlert, CheckCircle, Snowflake, Ban, AlertTriangle } from "lucide-react"
+import { ShieldAlert, CheckCircle, Snowflake, Ban, AlertTriangle, RotateCcw } from "lucide-react"
 import clsx from "clsx"
 
 export function SuspiciousPage() {
@@ -16,7 +16,7 @@ export function SuspiciousPage() {
   })
 
   const actMutation = useMutation({
-    mutationFn: ({ userId, action }: { userId: string; action: "approve" | "freeze_credits" | "suspend" }) =>
+    mutationFn: ({ userId, action }: { userId: string; action: "approve" | "freeze_credits" | "suspend" | "unsuspend" }) =>
       actOnFlaggedAccount(userId, action),
     onSuccess: () => {
       setActionError(null)
@@ -173,9 +173,20 @@ export function SuspiciousPage() {
                     </td>
                     <td className="text-right">
                       <div className="inline-flex items-center gap-1">
+                        {item.user_status === "suspended" && (
+                          <button
+                            title="Unsuspend account and restore access"
+                            disabled={actMutation.isPending}
+                            onClick={() => actMutation.mutate({ userId: item.user_id, action: "unsuspend" })}
+                            className="px-2 py-1 text-xs rounded border border-ok/40 text-ok hover:bg-ok/10 transition disabled:opacity-50 flex items-center gap-1"
+                          >
+                            <RotateCcw className="size-3.5" />
+                            Unsuspend
+                          </button>
+                        )}
                         <button
                           title="Approve account and unfreeze credits"
-                          disabled={actMutation.isPending}
+                          disabled={actMutation.isPending || item.user_status === "suspended"}
                           onClick={() => actMutation.mutate({ userId: item.user_id, action: "approve" })}
                           className="px-2 py-1 text-xs rounded border border-ok/40 text-ok hover:bg-ok/10 transition disabled:opacity-50 flex items-center gap-1"
                         >

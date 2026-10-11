@@ -2261,7 +2261,7 @@ adminApi.get("/flagged-accounts", async (c) => {
 })
 
 const flaggedActionSchema = z.object({
-  action: z.enum(["approve", "freeze_credits", "suspend"]),
+  action: z.enum(["approve", "freeze_credits", "suspend", "unsuspend"]),
 })
 
 adminApi.post("/flagged-accounts/:userId/action", async (c) => {
@@ -2277,6 +2277,30 @@ adminApi.post("/flagged-accounts/:userId/action", async (c) => {
   try {
     const [user] = await sql`SELECT id, email, status, credits_frozen FROM users WHERE id = ${userId}`
     if (!user) return jsonError(c, 404, "user_not_found")
+
+    if (action === "unsuspend") {
+      await sql`
+        UPDATE flagged_accounts
+        SET status = 'approved', reviewed_by = ${session.userId}, reviewed_at = now()
+        WHERE user_id = ${userId}
+      `
+      await sql`
+        UPDATE users
+        SET status = 'active', credits_frozen = false, credits_freeze_reason = NULL
+        WHERE id = ${userId}
+      `
+      invalidateActiveUserCache(userId)
+      await audit({
+        actorId: session.userId,
+        actorEmail: adminEmail,
+        action: "abuse.account_unsuspended",
+        resource: "abuse",
+        resourceId: userId,
+        ip: ip(c),
+        metadata: { target_email: user.email },
+      })
+      return c.json({ success: true, action: "unsuspended" })
+    }
 
     if (action === "approve") {
       await sql`
