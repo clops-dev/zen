@@ -19,13 +19,18 @@ const activeUserCache = new Map<string, CacheEntry>()
  * Single function used everywhere to verify that a user exists and is not
  * suspended or deleted. Caches the result in-memory for 20s.
  */
-export async function getActiveUser(userId: string): Promise<ActiveUser | null> {
-  if (!userId) return null
+export interface ActiveUserLookup {
+  user: ActiveUser | null
+  error: unknown | null
+}
+
+export async function getActiveUserDetailed(userId: string): Promise<ActiveUserLookup> {
+  if (!userId) return { user: null, error: null }
 
   const cached = activeUserCache.get(userId)
   const now = Date.now()
   if (cached && cached.expiresAt > now) {
-    return cached.user
+    return { user: cached.user, error: null }
   }
 
   try {
@@ -39,7 +44,7 @@ export async function getActiveUser(userId: string): Promise<ActiveUser | null> 
 
     if (rows.length === 0) {
       activeUserCache.set(userId, { user: null, expiresAt: now + 5000 })
-      return null
+      return { user: null, error: null }
     }
 
     const row = rows[0]
@@ -48,7 +53,7 @@ export async function getActiveUser(userId: string): Promise<ActiveUser | null> 
 
     if (userStatus === "suspended" || userStatus === "deleted" || subStatus === "suspended") {
       activeUserCache.set(userId, { user: null, expiresAt: now + 5000 })
-      return null
+      return { user: null, error: null }
     }
 
     const activeUser: ActiveUser = {
@@ -59,11 +64,15 @@ export async function getActiveUser(userId: string): Promise<ActiveUser | null> 
     }
 
     activeUserCache.set(userId, { user: activeUser, expiresAt: now + CACHE_TTL_MS })
-    return activeUser
-  } catch (err) {
-    console.error("[active-user] failed to query user:", err)
-    return null
+    return { user: activeUser, error: null }
+  } catch (error) {
+    console.error("[active-user] failed to query user:", error)
+    return { user: null, error }
   }
+}
+
+export async function getActiveUser(userId: string): Promise<ActiveUser | null> {
+  return (await getActiveUserDetailed(userId)).user
 }
 
 /**

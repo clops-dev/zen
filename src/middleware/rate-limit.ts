@@ -174,6 +174,7 @@ export const rateLimit = (
 ): MiddlewareHandler => async (c, next) => {
   const user = c.var.apiUser
   if (!user) return c.json({ error: "unauthorized" }, 401)
+  if (limit === 0) return next()
 
   const ip = getClientIp(c)
   const effectiveIpLimit = ipLimit ?? Math.max(limit, 60)

@@ -20,13 +20,13 @@ import { checkQuota, recordUsage } from "../lib/quota"
 import { deductCredits, usdToDt, InsufficientCreditsError, canSeeBalance } from "../lib/credits"
 import { hashPrompt, getCached, isResponseCacheEligible, setCached } from "../lib/cache"
 import { calcCost } from "../lib/pricing"
-import { DEFAULT_GATEWAY_RATE_LIMIT_RPM, GATEWAY_RATE_LIMIT_WINDOW_MS } from "../lib/rate-limit-config"
+import { gatewayRateLimitRpm, GATEWAY_RATE_LIMIT_WINDOW_MS } from "../lib/rate-limit-config"
 import { countInputTokens } from "../lib/tokens"
 import { resolveBilledInputTokens } from "../lib/billing-tokens"
 import { SSE_HEADERS } from "../lib/sse-headers"
 import { log } from "../lib/logger"
 import { recordRequestMetrics, recordStageMs } from "../lib/metrics"
-import { getActiveUser } from "../lib/active-user"
+import { getActiveUserDetailed } from "../lib/active-user"
 import { getClientIp } from "../lib/client-ip"
 import { reevaluateDeviceSignal } from "../lib/abuse-signals"
 
@@ -312,10 +312,19 @@ gateway.get("/models", requireApiKey(), async (c) => {
   })
 })
 
-gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RATE_LIMIT_RPM, GATEWAY_RATE_LIMIT_WINDOW_MS), async (c) => {
+gateway.post("/chat/completions", requireApiKey(), rateLimit(gatewayRateLimitRpm(), GATEWAY_RATE_LIMIT_WINDOW_MS), async (c) => {
   const user = c.var.apiUser
-  const activeUser = await getActiveUser(user.id)
-  if (!activeUser) {
+  const activeUserLookup = await getActiveUserDetailed(user.id)
+  if (activeUserLookup.error) {
+    return c.json({
+      error: {
+        message: "Unable to verify account status. Please retry shortly.",
+        type: "server_error",
+        code: "account_status_unavailable",
+      }
+    }, 503)
+  }
+  if (!activeUserLookup.user) {
     return c.json({
       error: {
         message: "Account is suspended or inactive",
@@ -324,6 +333,7 @@ gateway.post("/chat/completions", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RAT
       }
     }, 403)
   }
+  const activeUser = activeUserLookup.user
   const reqId = c.get("requestId") ?? c.req.header("x-request-id") ?? `req-${Date.now()}`
   const ip = getClientIp(c)
 
@@ -1170,7 +1180,7 @@ gateway.get("/embedding-models", requireApiKey(), async (c) => {
   })
 })
 
-gateway.post("/embeddings", requireApiKey(), rateLimit(DEFAULT_GATEWAY_RATE_LIMIT_RPM, GATEWAY_RATE_LIMIT_WINDOW_MS), async (c) => {
+gateway.post("/embeddings", requireApiKey(), rateLimit(gatewayRateLimitRpm(), GATEWAY_RATE_LIMIT_WINDOW_MS), async (c) => {
   const body = await c.req.json().catch(() => null)
   
   if (!body || !body.input) {

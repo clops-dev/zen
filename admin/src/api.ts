@@ -240,11 +240,16 @@ export const login = async (email: string, password: string) => {
   })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new ApiClientError(body?.error ?? "login_failed", body?.message ?? "Login failed", res.status)
-  if (body?.mfa_required || body?.mfa_setup_required) {
-    throw new ApiClientError("mfa_required", "MFA required by server, set ADMIN_MFA_REQUIRED=false or add MFA support", 200)
-  }
   return body
 }
+
+export const verifyMfa = (mfaTicket: string, code: string, recovery = false) =>
+  request<{ message: string; role: string }>("/v1/auth/mfa/verify", {
+    method: "POST",
+    body: JSON.stringify(recovery
+      ? { mfa_ticket: mfaTicket, recovery_code: code }
+      : { mfa_ticket: mfaTicket, totp_code: code }),
+  })
 
 export const logout = async () => {
   await fetch("/v1/auth/logout", { method: "POST", credentials: "include" })

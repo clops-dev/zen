@@ -2,11 +2,14 @@ import { useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { useQueryClient } from "@tanstack/react-query"
 import { ArrowRight, Loader2 } from "lucide-react"
-import { login, me } from "../api"
+import { login, me, verifyMfa } from "../api"
 
 export function Login() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
+  const [mfaTicket, setMfaTicket] = useState<string | null>(null)
+  const [mfaCode, setMfaCode] = useState("")
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const nav = useNavigate()
@@ -19,7 +22,19 @@ export function Login() {
     setLoading(true)
     setErr(null)
     try {
-      await login(email, password)
+      if (mfaTicket) {
+        await verifyMfa(mfaTicket, mfaCode, useRecoveryCode)
+      } else {
+        const result = await login(email, password)
+        if (result?.mfa_required) {
+          setMfaTicket(result.mfa_ticket)
+          return
+        }
+        if (result?.mfa_setup_required) {
+          setErr("MFA setup is required. Use the user portal to enroll MFA, then return here.")
+          return
+        }
+      }
       const u = await me()
       if (u.user.role !== "admin") {
         setErr("This account does not have admin access.")
@@ -46,6 +61,7 @@ export function Login() {
           </div>
         </div>
         <form onSubmit={submit} className="flex flex-col gap-3">
+          {!mfaTicket && <>
           <label className="label">Email</label>
           <input
             className="input"
@@ -63,12 +79,28 @@ export function Login() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
+          </>}
+          {mfaTicket && <>
+            <label className="label">{useRecoveryCode ? "Recovery code" : "Authenticator code"}</label>
+            <input
+              className="input"
+              type="text"
+              inputMode="numeric"
+              required
+              value={mfaCode}
+              onChange={(e) => setMfaCode(e.target.value)}
+              autoFocus
+            />
+            <button type="button" className="text-xs text-accent text-left" onClick={() => setUseRecoveryCode(!useRecoveryCode)}>
+              {useRecoveryCode ? "Use authenticator code" : "Use recovery code"}
+            </button>
+          </>}
           {err && (
             <div className="text-bad text-sm border border-bad/30 bg-bad/10 rounded-md p-2">{err}</div>
           )}
           <button className="btn-primary mt-2" type="submit" disabled={loading}>
             {loading ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
-            Sign in
+            {mfaTicket ? "Verify MFA" : "Sign in"}
           </button>
         </form>
         <p className="text-xs text-muted mt-4">
