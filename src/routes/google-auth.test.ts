@@ -641,9 +641,9 @@ describe("Google OAuth Flow Security & Attack Tests", () => {
   })
 
   // -------------------------------------------------------------------------
-  // ATTACK TEST 7: Suspended user attempting Google login -> rejected
+  // GOOGLE LOGIN STATUS COMPATIBILITY
   // -------------------------------------------------------------------------
-  test("security: suspended user attempting login -> rejected, no session", async () => {
+  test("Google login succeeds regardless of subscription status", async () => {
     users.push({
       id: "suspended-user-1",
       email: "suspended@example.com",
@@ -686,8 +686,8 @@ describe("Google OAuth Flow Security & Attack Tests", () => {
 
     const res = await app.request(req)
     expect(res.status).toBe(303)
-    expect(res.headers.get("location")).toBe("/zencode/login?error=auth_failed")
-    expect(res.headers.get("set-cookie")?.includes(`${SESSION_COOKIE}=`)).toBe(false)
+    expect(res.headers.get("location")).toBe("/zencode/app/dashboard")
+    expect(res.headers.get("set-cookie")?.includes(`${SESSION_COOKIE}=`)).toBe(true)
   })
 
   // -------------------------------------------------------------------------

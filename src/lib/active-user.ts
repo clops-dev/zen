@@ -16,8 +16,8 @@ const CACHE_TTL_MS = 20_000 // 20s (within required 15-30s range)
 const activeUserCache = new Map<string, CacheEntry>()
 
 /**
- * Single function used everywhere to verify that a user exists and is not
- * suspended or deleted. Caches the result in-memory for 20s.
+ * Single function used everywhere to verify that a user exists. Caches the
+ * result in-memory for 20s.
  */
 export interface ActiveUserLookup {
   user: ActiveUser | null
@@ -35,9 +35,9 @@ export async function getActiveUserDetailed(userId: string): Promise<ActiveUserL
 
   try {
     const rows = await withDbResilience(() => sql`
-      SELECT u.id, u.email, u.role, COALESCE(u.status, 'active') AS user_status, COALESCE(s.status, 'active') AS sub_status
-      FROM users u
-      LEFT JOIN subscriptions s ON s.user_id = u.id
+       SELECT u.id, u.email, u.role, COALESCE(u.status, 'active') AS user_status
+       FROM users u
+
       WHERE u.id = ${userId}
       LIMIT 1
     `)
@@ -49,9 +49,8 @@ export async function getActiveUserDetailed(userId: string): Promise<ActiveUserL
 
     const row = rows[0]
     const userStatus = String(row.user_status ?? "active").toLowerCase()
-    const subStatus = String(row.sub_status ?? "active").toLowerCase()
 
-    if (userStatus === "suspended" || userStatus === "deleted" || subStatus === "suspended") {
+    if (userStatus === "deleted") {
       activeUserCache.set(userId, { user: null, expiresAt: now + 5000 })
       return { user: null, error: null }
     }

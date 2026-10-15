@@ -60,7 +60,7 @@ web.post("/login", async (c) => {
   const ok = await verifyPassword(password, user.password_hash)
   if (!ok) return c.redirect("/login?error=invalid+credentials", 303)
   const activeUser = await getActiveUser(user.id)
-  if (!activeUser) return c.redirect("/login?error=account+suspended", 303)
+  if (!activeUser) return c.redirect("/login?error=invalid+credentials", 303)
 
   // The form flow has no TOTP challenge, so it must not issue an admin
   // session while administrator MFA is required.
@@ -256,18 +256,8 @@ web.get("/device", async (c) => {
     return c.redirect(`/login?error=login_required_for_device&redirect=${encodeURIComponent(returnPath)}`, 303)
   }
 
-  // Account suspension check
   const activeUser = await getActiveUser(session.userId)
-  if (!activeUser) {
-    return c.html(
-      layoutHtml(
-        "suspended",
-        "",
-        "<div class='center-wrap'><div class='center-card'><h1>Account Suspended</h1><p class='lead'>Your account has been suspended. You cannot authorize devices.</p></div></div>",
-      ),
-      403,
-    )
-  }
+  if (!activeUser) return c.redirect("/login?error=login_required_for_device", 303)
 
   let error = c.req.query("error") || ""
 
@@ -388,16 +378,7 @@ web.post("/device/approve", async (c) => {
   setCookie(c, "zen_device_csrf", "", { path: "/", maxAge: 0 })
 
   const activeUser = await getActiveUser(session.userId)
-  if (!activeUser) {
-    return c.html(
-      layoutHtml(
-        "suspended",
-        "",
-        "<div class='center-wrap'><div class='center-card'><h1>Account Suspended</h1><p class='lead'>Your account has been suspended.</p></div></div>",
-      ),
-      403,
-    )
-  }
+  if (!activeUser) return c.redirect("/login?error=authentication_required", 303)
 
   const rawCode = String(body.user_code ?? "")
   const ok = await approveDeviceByUserCode(rawCode, session.userId)

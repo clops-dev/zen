@@ -63,12 +63,11 @@ describe("getActiveUser", () => {
     expect(res).toBeNull()
   })
 
-  test("returns null if user status is suspended", async () => {
+  test("returns a user regardless of stored status", async () => {
     users.push({ id: "user-suspended", email: "susp@example.com", role: "user", status: "suspended" })
-    subs.push({ user_id: "user-suspended", status: "active" })
 
     const res = await getActiveUser("user-suspended")
-    expect(res).toBeNull()
+    expect(res?.id).toBe("user-suspended")
   })
 
   test("returns null if user status is deleted", async () => {
@@ -79,12 +78,12 @@ describe("getActiveUser", () => {
     expect(res).toBeNull()
   })
 
-  test("returns null if subscription status is suspended", async () => {
+  test("returns a user regardless of subscription status", async () => {
     users.push({ id: "user-sub-suspended", email: "sub-susp@example.com", role: "user", status: "active" })
     subs.push({ user_id: "user-sub-suspended", status: "suspended" })
 
     const res = await getActiveUser("user-sub-suspended")
-    expect(res).toBeNull()
+    expect(res?.id).toBe("user-sub-suspended")
   })
 
   test("caches active user for TTL and avoids extra queries", async () => {

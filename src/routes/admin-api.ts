@@ -162,7 +162,7 @@ const userListSchema = z.object({
   search: z.string().max(200).optional(),
   q: z.string().max(200).optional(),
   plan: z.enum(["free", "paid"]).optional(),
-  status: z.enum(["active", "suspended", "deleted"]).optional(),
+  status: z.enum(["active", "deleted"]).optional(),
   sort: z.enum(["created_at"]).default("created_at"),
   order: z.enum(["asc", "desc"]).default("desc"),
   cursor: z.string().max(500).optional(),
@@ -359,7 +359,7 @@ adminApi.post("/users", async (c) => {
 const userUpdateSchema = z.object({
   role: z.enum(["user", "admin"]).optional(),
   tier: z.enum(["free", "pro", "enterprise"]).optional(),
-  status: z.enum(["active", "suspended"]).optional(),
+  status: z.enum(["active"]).optional(),
   subscription_price_usd: z.coerce.number().min(0).optional(),
   token_budget_monthly: z.coerce.number().int().min(0).optional(),
   spending_cap_usd: z.coerce.number().min(0).optional().nullable(),
@@ -385,10 +385,6 @@ adminApi.patch("/users/:id", async (c) => {
       try {
         await sql`UPDATE users SET status = ${parsed.data.status} WHERE id = ${id}`
       } catch {}
-      if (parsed.data.status === "suspended") {
-        await revokeAllUserSessions(id)
-        invalidateActiveUserCache(id)
-      }
     }
     if (
       parsed.data.tier || parsed.data.status || parsed.data.subscription_price_usd !== undefined || parsed.data.token_budget_monthly !== undefined ||
@@ -1999,7 +1995,6 @@ adminApi.get("/settings", async (c) => {
     const [s] = await sql`
       SELECT
         (SELECT count(*) FROM users) AS users_total,
-        (SELECT count(*) FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id WHERE s.status='suspended') AS users_suspended,
         (SELECT count(*) FROM providers WHERE enabled) AS providers_active,
         (SELECT count(*) FROM models WHERE enabled) AS models_active,
         (SELECT count(*) FROM api_keys WHERE revoked = false) AS api_keys_active,
@@ -2261,7 +2256,7 @@ adminApi.get("/flagged-accounts", async (c) => {
 })
 
 const flaggedActionSchema = z.object({
-  action: z.enum(["approve", "freeze_credits", "suspend", "unsuspend"]),
+  action: z.enum(["approve", "freeze_credits"]),
 })
 
 adminApi.post("/flagged-accounts/:userId/action", async (c) => {
@@ -2277,30 +2272,6 @@ adminApi.post("/flagged-accounts/:userId/action", async (c) => {
   try {
     const [user] = await sql`SELECT id, email, status, credits_frozen FROM users WHERE id = ${userId}`
     if (!user) return jsonError(c, 404, "user_not_found")
-
-    if (action === "unsuspend") {
-      await sql`
-        UPDATE flagged_accounts
-        SET status = 'approved', reviewed_by = ${session.userId}, reviewed_at = now()
-        WHERE user_id = ${userId}
-      `
-      await sql`
-        UPDATE users
-        SET status = 'active', credits_frozen = false, credits_freeze_reason = NULL
-        WHERE id = ${userId}
-      `
-      invalidateActiveUserCache(userId)
-      await audit({
-        actorId: session.userId,
-        actorEmail: adminEmail,
-        action: "abuse.account_unsuspended",
-        resource: "abuse",
-        resourceId: userId,
-        ip: ip(c),
-        metadata: { target_email: user.email },
-      })
-      return c.json({ success: true, action: "unsuspended" })
-    }
 
     if (action === "approve") {
       await sql`
@@ -2346,31 +2317,6 @@ adminApi.post("/flagged-accounts/:userId/action", async (c) => {
         metadata: { target_email: user.email },
       })
       return c.json({ success: true, action: "frozen" })
-    }
-
-    if (action === "suspend") {
-      await sql`
-        UPDATE flagged_accounts
-        SET status = 'suspended', reviewed_by = ${session.userId}, reviewed_at = now()
-        WHERE user_id = ${userId}
-      `
-      await sql`
-        UPDATE users
-        SET status = 'suspended', credits_frozen = true, credits_freeze_reason = 'admin_suspended'
-        WHERE id = ${userId}
-      `
-      await revokeAllUserSessions(userId)
-      invalidateActiveUserCache(userId)
-      await audit({
-        actorId: session.userId,
-        actorEmail: adminEmail,
-        action: "abuse.account_suspended",
-        resource: "abuse",
-        resourceId: userId,
-        ip: ip(c),
-        metadata: { target_email: user.email },
-      })
-      return c.json({ success: true, action: "suspended" })
     }
 
     return jsonError(c, 400, "invalid_action")

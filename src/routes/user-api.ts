@@ -362,7 +362,7 @@ userApi.get("/mfa", async (c) => {
 userApi.post("/mfa/setup", async (c) => {
   const { userId } = c.var.session
   const activeUser = await getActiveUser(userId)
-  if (!activeUser) return c.json({ error: "account_suspended" }, 403)
+  if (!activeUser) return c.json({ error: "user_not_found" }, 404)
 
   const secret = generateTotpSecret()
   const recoveryCodes = generateRecoveryCodes(8)

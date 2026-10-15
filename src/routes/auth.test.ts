@@ -166,7 +166,7 @@ describe("Auth Route Hardening & Attack Tests", () => {
     setSql(mockSql)
   })
 
-  test("attack: suspended user login is rejected (403)", async () => {
+  test("login succeeds regardless of stored account status", async () => {
     const pwHash = await hashPassword("password123")
     users.push({ id: "user-susp", email: "susp@example.com", password_hash: pwHash, role: "user", status: "suspended" })
 
@@ -176,9 +176,9 @@ describe("Auth Route Hardening & Attack Tests", () => {
       body: JSON.stringify({ email: "susp@example.com", password: "password123" }),
     })
 
-    expect(res.status).toBe(403)
+    expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.error).toBe("account_suspended")
+    expect(body.message).toBe("logged in")
   })
 
   test("login rotates session id (creates new session row, invalidates old token)", async () => {

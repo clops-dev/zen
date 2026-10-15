@@ -19,7 +19,6 @@
  * 4. Existing password accounts are NEVER silently linked; linking requires
  *    the user to be authenticated into that account first.
  * 5. All emails are canonicalized via normalizeEmail (lower(trim())).
- * 6. Suspended users are checked and denied before issuing any session.
  * 7. Fails closed on every error path, never revealing failure reasons to the browser.
  */
 
@@ -28,7 +27,6 @@ import { setCookie, getCookie } from "hono/cookie"
 import { randomBytes, createHash } from "node:crypto"
 import { sql } from "../lib/db"
 import { issueSession, verifySession, SESSION_COOKIE, SESSION_COOKIE_OPTIONS, getSessionToken, setSessionCookie } from "../lib/session"
-import { getActiveUser } from "../lib/active-user"
 import { env } from "../lib/env"
 import { log } from "../lib/logger"
 import { approveDeviceCode } from "./device-auth"
@@ -284,12 +282,6 @@ googleAuth.get("/google/callback", async (c) => {
       userId = existingByGoogle[0].id
       userRole = existingByGoogle[0].role === "admin" ? "admin" : "user"
 
-      // Check suspended status before issuing session
-      const activeUser = await getActiveUser(userId)
-      if (!activeUser) {
-        return failClosed("account_suspended", { userId })
-      }
-
       // Refresh avatar
       if (avatarUrl) {
         await sql`UPDATE users SET avatar_url = ${avatarUrl} WHERE id = ${userId}`
@@ -319,12 +311,6 @@ googleAuth.get("/google/callback", async (c) => {
 
         userId = existing.id
         userRole = existing.role === "admin" ? "admin" : "user"
-
-        // Check suspended status before linking
-        const activeUser = await getActiveUser(userId)
-        if (!activeUser) {
-          return failClosed("account_suspended", { userId })
-        }
 
         await sql`
           UPDATE users
@@ -377,12 +363,6 @@ googleAuth.get("/google/callback", async (c) => {
           })
         }
       }
-    }
-
-    // Final check for suspension before issuing session
-    const finalActive = await getActiveUser(userId)
-    if (!finalActive) {
-      return failClosed("account_suspended", { userId })
     }
 
     // Issue session cookie

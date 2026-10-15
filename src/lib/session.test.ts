@@ -199,7 +199,7 @@ describe("Server-side Session Management", () => {
     expect(userSess.maxAgeSec).toBe(30 * 24 * 3600)
   })
 
-  test("suspended user session verification fails even with unexpired valid session", async () => {
+  test("stored account status does not invalidate an unexpired session", async () => {
     const user: MockUser = { id: "user-1", email: "user@example.com", role: "user", status: "active" }
     users.push(user)
 
@@ -210,7 +210,7 @@ describe("Server-side Session Management", () => {
     user.status = "suspended"
     invalidateActiveUserCache("user-1")
 
-    expect(await verifySession(issued.token)).toBeNull()
+    expect(await verifySession(issued.token)).not.toBeNull()
   })
 
   afterAll(() => {

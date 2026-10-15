@@ -486,11 +486,7 @@ auth.post("/login", async (c) => {
     }
   }
 
-  // Enforce account state everywhere via getActiveUser
-  const activeUser = await getActiveUser(user.id)
-  if (!activeUser) {
-    return c.json({ error: "account_suspended", message: "Your account has been suspended" }, 403)
-  }
+  const activeUser = user
 
   // Reset rate limit counters on successful credential verification
   await resetAuthRateLimit("login", "ip", ip)
@@ -797,7 +793,7 @@ auth.post("/mfa/setup", async (c) => {
   if (!userId) return c.json({ error: "unauthorized", message: "Session or valid MFA ticket required" }, 401)
 
   const activeUser = await getActiveUser(userId)
-  if (!activeUser) return c.json({ error: "account_suspended" }, 403)
+  if (!activeUser) return c.json({ error: "user_not_found" }, 404)
 
   const secret = generateTotpSecret()
   const recoveryCodes = generateRecoveryCodes(8)
@@ -896,7 +892,7 @@ auth.post("/mfa/verify", async (c) => {
   if (!userId) return c.json({ error: "invalid_ticket", message: "MFA ticket expired or invalid" }, 401)
 
   const activeUser = await getActiveUser(userId)
-  if (!activeUser) return c.json({ error: "account_suspended" }, 403)
+  if (!activeUser) return c.json({ error: "user_not_found" }, 404)
 
   const mfaRows = await withDbResilience(() => sql`
     SELECT totp_secret, enabled FROM user_mfa WHERE user_id = ${userId} LIMIT 1

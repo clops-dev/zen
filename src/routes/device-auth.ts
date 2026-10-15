@@ -236,7 +236,7 @@ const pollHandler = async (c: Context) => {
     const userId = updated[0].user_id
     const activeUser = await getActiveUser(userId)
     if (!activeUser) {
-      return c.json({ error: "account_suspended", message: "Account is suspended" }, 403)
+      return c.json({ error: "user_not_found", message: "User not found" }, 404)
     }
 
     // Mint long-lived API key at the moment of successful poll

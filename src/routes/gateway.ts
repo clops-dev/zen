@@ -315,23 +315,14 @@ gateway.get("/models", requireApiKey(), async (c) => {
 gateway.post("/chat/completions", requireApiKey(), rateLimit(gatewayRateLimitRpm(), GATEWAY_RATE_LIMIT_WINDOW_MS), async (c) => {
   const user = c.var.apiUser
   const activeUserLookup = await getActiveUserDetailed(user.id)
-  if (activeUserLookup.error) {
+  if (activeUserLookup.error || !activeUserLookup.user) {
     return c.json({
       error: {
-        message: "Unable to verify account status. Please retry shortly.",
+        message: "Unable to verify account. Please retry shortly.",
         type: "server_error",
-        code: "account_status_unavailable",
+        code: "account_unavailable",
       }
     }, 503)
-  }
-  if (!activeUserLookup.user) {
-    return c.json({
-      error: {
-        message: "Account is suspended or inactive",
-        type: "permission_error",
-        code: "account_suspended",
-      }
-    }, 403)
   }
   const activeUser = activeUserLookup.user
   const reqId = c.get("requestId") ?? c.req.header("x-request-id") ?? `req-${Date.now()}`

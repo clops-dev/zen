@@ -6,7 +6,6 @@ import { api } from '@/lib/api';
 
 const ERROR_MESSAGES: Record<string, string> = {
   auth_failed: 'Authentication failed. Please try again.',
-  account_suspended: 'Your account has been suspended. Please contact support.',
   google_not_configured: 'Google login is not configured on this server.',
   token_exchange_failed: 'Google authentication failed. Please try again.',
   profile_fetch_failed: 'Could not retrieve your Google profile. Please try again.',
